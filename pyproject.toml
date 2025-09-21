@@ -1,0 +1,39 @@
+[build-system]
+requires = [
+    "hatchling",
+]
+build-backend = "hatchling.build"
+
+[project]
+name = "Pixar-Render"
+version = "0.0.3"
+authors = [
+  { name="Yintao Tai", email="tai.yintao@gmail.com" },
+]
+description = "Provide rendering functions for project PIXAR."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Utilities",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Typing :: Typed",
+]
+dependencies = [
+  "pycairo==1.24.0",
+  "fonttools==4.25.0",
+  "manimpango==0.4.1",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/TYTTYTTYT/HyperArgs"
+"Bug Tracker" = "https://github.com/TYTTYTTYT/HyperArgs/issues"
+"repository" = "https://github.com/TYTTYTTYT/HyperArgs.git"

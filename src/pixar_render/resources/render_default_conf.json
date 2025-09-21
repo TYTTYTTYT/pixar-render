@@ -1,0 +1,13 @@
+{
+  "font_file": "GoNotoCurrent.ttf",
+  "font_size": 8,
+  "font_color": "black",
+  "background_color": "white",
+  "rgb": false,
+  "dpi": 120,
+  "pad_size": 3,
+  "pixels_per_patch": 16,
+  "max_seq_length": 529,
+  "patch_len": 1,
+  "fallback_fonts_dir": null
+}
