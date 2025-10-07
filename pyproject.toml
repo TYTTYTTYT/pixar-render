@@ -1,8 +1,5 @@
 [build-system]
-requires = [
-    "hatchling",
-]
-build-backend = "hatchling.build"
+requires = ["setuptools", "wheel"]
 
 [project]
 name = "Pixar-Render"
@@ -12,7 +9,7 @@ authors = [
 ]
 description = "Provide rendering functions for project PIXAR."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
@@ -28,12 +25,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-  "pycairo==1.24.0",
-  "fonttools==4.25.0",
-  "manimpango==0.4.1",
+  "jupyter",
+  "numpy",
+  "torch",
+  "torchvision",
 ]
+license = "LICENSE"
 
 [project.urls]
-"Homepage" = "https://github.com/TYTTYTTYT/HyperArgs"
-"Bug Tracker" = "https://github.com/TYTTYTTYT/HyperArgs/issues"
-"repository" = "https://github.com/TYTTYTTYT/HyperArgs.git"
+"Homepage" = "https://github.com/TYTTYTTYT/Pixar-Render"
+"Bug Tracker" = "https://github.com/TYTTYTTYT/Pixar-Render/issues"
+"repository" = "https://github.com/TYTTYTTYT/Pixar-Render.git"
