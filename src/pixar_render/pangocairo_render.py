@@ -8,7 +8,45 @@ import math
 import os
 import string
 
+try:
+    import cairo
+except ImportError:
+    import subprocess
+    import sys
+    print('begin to install cairo dependencies...')
+    """Check if Conda is installed."""
+    try:
+        subprocess.check_call(["conda", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print("Conda is installed!")
+    except FileNotFoundError:
+        print("Error: Conda is not installed. Please install Conda to proceed.")
+        sys.exit(1)
+    except subprocess.CalledProcessError:
+        print("Error: Conda command failed. Make sure Conda is installed correctly.")
+        sys.exit(1)
+
+    env_str = """channels:
+  - conda-forge
+  - anaconda
+  - defaults
+dependencies:
+  - cairo=1.16.0
+  - pycairo=1.24.0
+  - fonttools=4.25.0
+  - pygobject
+  - manimpango=0.4.1"""
+    with open("_environment.yml", "w") as f:
+        f.write(env_str)
+
+    """Install Conda dependencies from environment.yml."""
+    try:
+        subprocess.check_call(["conda", "env", "update", "-f", '_environment.yml'])
+    except subprocess.CalledProcessError:
+        print("Error: Conda dependencies installation failed.")
+        sys.exit(1)
+    os.remove('_environment.yml')
 import cairo
+
 import gi
 import manimpango
 import numpy as np

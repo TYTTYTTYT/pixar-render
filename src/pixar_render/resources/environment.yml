@@ -1,0 +1,10 @@
+channels:
+  - conda-forge
+  - anaconda
+  - defaults
+dependencies:
+  - cairo=1.16.0
+  - pycairo=1.24.0
+  - fonttools=4.25.0
+  - pygobject
+  - manimpango=0.4.1
