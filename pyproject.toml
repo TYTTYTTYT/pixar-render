@@ -25,14 +25,16 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-  "jupyter",
   "numpy",
   "torch",
   "torchvision",
+  "pillow",
 ]
-license = "LICENSE"
 
 [project.urls]
 "Homepage" = "https://github.com/TYTTYTTYT/Pixar-Render"
 "Bug Tracker" = "https://github.com/TYTTYTTYT/Pixar-Render/issues"
 "repository" = "https://github.com/TYTTYTTYT/Pixar-Render.git"
+
+[project.license]
+"file" = "LICENSE"

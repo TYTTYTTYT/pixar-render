@@ -1426,7 +1426,7 @@ class PangoCairoTextRenderer():
 
     def __call__(
         self,
-        text: Union[str, Tuple[str, str], List[str]],
+        text: Union[str, Tuple[str, ...], List[str]],
         return_overflowing_patches: bool = False,
         return_offset_mapping: bool = False,
         stride: int = 0,
