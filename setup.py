@@ -2,9 +2,19 @@ import subprocess
 import sys
 import os
 import tomllib
-from setuptools import setup
+from setuptools import setup, find_packages
 from typing import List, Tuple, Union, Dict
 from types import EllipsisType
+from pathlib import Path
+
+from setuptools.command.build_py import build_py as _build_py
+
+class build_py(_build_py):
+    def run(self):
+        # your custom step happens during wheel build
+        check_conda_installed()
+        install_conda_dependencies()
+        super().run()
 
 def check_conda_installed() -> None:
     """Check if Conda is installed."""
@@ -20,7 +30,8 @@ def check_conda_installed() -> None:
 
 def install_conda_dependencies() -> None:
     """Install Conda dependencies from environment.yml."""
-    if not os.path.exists("environment.yml"):
+    path = Path(__file__).parent
+    if not (path / "environment.yml").exists():
         print("Error: environment.yml not found. Please ensure the file exists in the project directory.")
         sys.exit(1)
 
@@ -101,7 +112,17 @@ def main() -> None:
         long_description_content_type="text/markdown" if isinstance(long_description, str) else ... , # Can be changed based on your format (e.g., reStructuredText) # type: ignore
         project_urls=urls,  # Modify this to your package's URL
         classifiers=classifiers, # type: ignore
-        python_requires=python_requires
+        python_requires=python_requires,
+        packages=find_packages(where="src"),
+        package_dir={"": "src"},
+        package_data={
+            "pixar_render": [
+                "resources/render_default_conf.json",
+                "resources/fonts/*.ttf",
+            ],
+        },
+        include_package_data=True,
+        cmdclass={"build_py": build_py},
     )
 
 if __name__ == "__main__":

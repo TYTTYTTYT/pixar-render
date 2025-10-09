@@ -1,0 +1,3 @@
+recursive-include src/pixar_render/resources *
+include environment.yml
+include setup.py
