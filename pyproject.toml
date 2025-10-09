@@ -3,7 +3,7 @@ requires = ["setuptools", "wheel"]
 
 [project]
 name = "Pixar-Render"
-version = "0.0.3"
+version = "0.0.1"
 authors = [
   { name="Yintao Tai", email="tai.yintao@gmail.com" },
 ]

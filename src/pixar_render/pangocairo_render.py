@@ -887,7 +887,6 @@ class PangoCairoTextRenderer():
 
         image = self.get_image_from_surface(surface, sep_patches=sep_patches)
         num_text_patches = self.px2patch_floor(eos_patch_offset) # type: ignore
-        print(f'num_text_patches: {num_text_patches}')
 
         encoding = Encoding(
             pixel_values=image,

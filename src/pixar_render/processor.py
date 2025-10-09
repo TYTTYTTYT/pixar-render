@@ -89,6 +89,22 @@ class PixarEncoding:
     sep_patches: List[List[int]]
     text: List[Union[str, Tuple[str, ...]]]
 
+    def to(self, device: Union[str, int]) -> 'PixarEncoding':
+        return PixarEncoding(
+            pixel_values=self.pixel_values.to(device),
+            num_text_patches=deepcopy(self.num_text_patches),
+            sep_patches=deepcopy(self.sep_patches),
+            text=deepcopy(self.text)
+        )
+
+    def clone(self) -> 'PixarEncoding':
+        return PixarEncoding(
+            pixel_values=self.pixel_values.clone(),
+            num_text_patches=deepcopy(self.num_text_patches),
+            sep_patches=deepcopy(self.sep_patches),
+            text=deepcopy(self.text)
+        )
+
 
 class PixarProcessor:
     def __init__(
@@ -330,5 +346,38 @@ class PixarProcessor:
             sep_patches=sep_patches
         )
 
-    def reduce_white_space(self, pixar_encoding: PixarEncoding) -> PixarEncoding:
-        # TODO:
+    def _reduce_white_space_at_i(self, pixar_encoding: PixarEncoding, i: int, max_space: int) -> None:
+        if pixar_encoding.num_text_patches[i] - 1 not in pixar_encoding.sep_patches[i]:
+            last_idx = pixar_encoding.num_text_patches[i] - 1
+        else:
+            last_idx = pixar_encoding.num_text_patches[i] - 1
+            while last_idx in pixar_encoding.sep_patches[i]:
+                last_idx -= 1
+                if last_idx < 0:
+                    raise ValueError("No text token before the SEP token.")
+
+        block_len = self.pixels_per_patch * self.patch_len
+        last_pixel = last_idx * self.pixels_per_patch * self.patch_len + block_len - 1
+        space_dist = 0
+        while (pixar_encoding.pixel_values[i, :, :, last_pixel] == 1.0).all():
+            last_pixel -= 1
+            space_dist += 1
+            if last_pixel < 0:
+                raise ValueError('No non-white content in this image.')
+
+        if space_dist <= max_space:
+            return
+
+        shift_dist = space_dist - max_space
+
+        # N, W, C, H
+        pixar_encoding.pixel_values[i, :, :, shift_dist:last_pixel+shift_dist+1] = \
+            pixar_encoding.pixel_values.clone()[i, :, :, 0:last_pixel+1]
+        pixar_encoding.pixel_values[i, :, :, 0:shift_dist] = 1.0
+
+    @torch.no_grad()
+    def reduce_white_space(self, pixar_encoding: PixarEncoding, max_white_space: int) -> PixarEncoding:
+        reduced = pixar_encoding.clone()
+        for i in range(reduced.pixel_values.shape[0]):
+            self._reduce_white_space_at_i(reduced, i, max_white_space)
+        return reduced
