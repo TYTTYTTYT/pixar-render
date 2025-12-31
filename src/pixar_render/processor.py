@@ -1,4 +1,7 @@
-from typing import Union, List, Tuple, Callable, ParamSpec, TypeVar
+"""
+Processor for Pixar Render
+"""
+from typing import Union, List, Tuple, Callable, ParamSpec, TypeVar, Literal
 import json
 from pathlib import Path
 from math import ceil, sqrt
@@ -81,28 +84,64 @@ def cal_sep_patches(sep_patches: List[int], patch_len: int, pixel_per_patch: int
             sep_idxes.append(int(idx))
     return sep_idxes
 
+def create_attention_mask(
+    dims: Tuple[int, int],
+    padding_side: Literal['right', 'left'], 
+    seq_lens: List[int]
+) -> torch.Tensor:
+    """
+    Creates an attention mask tensor.
+
+    Args:
+        dims (Tuple[int, int]): The dimensions of the attention mask (batch_size, seq_len).
+        padding_side (str): The side to pad on, either 'left' or 'right'.
+        seq_lens (List[int]): A list containing the number of 
+            non-padding tokens for each item in the batch.
+
+    Returns:
+        torch.Tensor: The attention mask.
+    """
+    batch_size, seq_len = dims
+    attention_mask = torch.zeros(dims, dtype=torch.long)
+
+    if padding_side not in ['left', 'right']:
+        raise ValueError("padding_side must be 'left' or 'right'")
+
+    for i in range(batch_size):
+        n = seq_lens[i]
+        if n > seq_len:
+            raise ValueError(
+                f"Number of non-padding tokens ({n}) for item {i} is greater than sequence length ({seq_len})"
+            )
+        if padding_side == 'right':
+            attention_mask[i, :n] = 1
+        else: # padding_side == 'left'
+            attention_mask[i, -n:] = 1
+            
+    return attention_mask
+
 
 @dataclass
 class PixarEncoding:
     pixel_values: torch.Tensor
+    attention_mask: torch.Tensor
     num_text_patches: List[int]
     sep_patches: List[List[int]]
-    text: List[Union[str, Tuple[str, ...]]]
 
     def to(self, device: Union[str, int]) -> 'PixarEncoding':
         return PixarEncoding(
             pixel_values=self.pixel_values.to(device),
+            attention_mask=self.attention_mask.to(device),
             num_text_patches=deepcopy(self.num_text_patches),
             sep_patches=deepcopy(self.sep_patches),
-            text=deepcopy(self.text)
         )
 
     def clone(self) -> 'PixarEncoding':
         return PixarEncoding(
             pixel_values=self.pixel_values.clone(),
+            attention_mask=self.attention_mask.clone(),
             num_text_patches=deepcopy(self.num_text_patches),
             sep_patches=deepcopy(self.sep_patches),
-            text=deepcopy(self.text)
         )
 
 
@@ -128,6 +167,30 @@ class PixarProcessor:
         contour_width: int = 1,
         device: Union[str, int] = 'cpu'
     ):
+        """
+        Initializes the PixarProcessor.
+
+        Args:
+            font_file (str): Name of the font file. If you want to use a custom font,
+                you need to put the font file in the `resources/fonts` directory.
+            font_size (int): Font size.
+            font_color (str): Font color.
+            background_color (str): Background color.
+            binary (bool): Whether to binarize the output image.
+            rgb (bool): Whether to render in RGB.
+            dpi (int): Dots per inch.
+            pad_size (int): Padding size.
+            pixels_per_patch (int): Number of pixels per patch.
+            max_seq_length (int): Maximum sequence length.
+            fallback_fonts_dir (str | None): Directory for fallback fonts.
+            patch_len (int): Patch length.
+            contour_r (float): Red component of the contour color.
+            contour_g (float): Green component of the contour color.
+            contour_b (float): Blue component of the contour color.
+            contour_alpha (float): Alpha component of the contour color.
+            contour_width (int): Width of the contour.
+            device (Union[str, int]): Device to use for processing ('cpu' or GPU index).
+        """
         self.font_file = font_file
         self.font_size = font_size
         self.font_color = font_color
@@ -147,7 +210,8 @@ class PixarProcessor:
         self.contour_width = contour_width
         self.device = device
 
-        assert max_seq_length % patch_len == 0, f"max_seq_length must be divisible by patch_len, but got {max_seq_length} and {patch_len}"
+        assert max_seq_length % patch_len == 0, \
+            f"max_seq_length must be divisible by patch_len, but got {max_seq_length} and {patch_len}"
 
         self.renderer = PangoCairoTextRenderer(
             font_file,
@@ -206,7 +270,23 @@ class PixarProcessor:
         return pixel_values
 
     @torch.no_grad()
-    def convert_to_pil(self, pixar_encoding: PixarEncoding, square: bool = True, contour: bool = False) -> List[Image.Image]:
+    def convert_to_pil(
+        self, 
+        pixar_encoding: PixarEncoding, 
+        square: bool = True, 
+        contour: bool = False
+    ) -> List[Image.Image]:
+        """
+        Converts a PixarEncoding object to a list of PIL Images.
+
+        Args:
+            pixar_encoding (PixarEncoding): The PixarEncoding to convert.
+            square (bool): Whether to reshape the image into a square. Defaults to True.
+            contour (bool): Whether to add a contour to the image. Defaults to False.
+
+        Returns:
+            List[Image.Image]: A list of converted PIL Images.
+        """
         pixel_values = pixar_encoding.pixel_values
         if contour:
             pixel_values = self._add_contour(pixel_values)
@@ -218,6 +298,15 @@ class PixarProcessor:
         return images
 
     def save_as_images(self, pixar_encoding: PixarEncoding, dir_path: str, square: bool = True, contour: bool = False):
+        """
+        Saves the images from a PixarEncoding object to a directory.
+
+        Args:
+            pixar_encoding (PixarEncoding): The PixarEncoding object containing the images.
+            dir_path (str): The directory path to save the images to.
+            square (bool, optional): Whether to save the images as squares. Defaults to True.
+            contour (bool, optional): Whether to add a contour to the images before saving. Defaults to False.
+        """
         images = self.convert_to_pil(pixar_encoding, square, contour)
         path_dir = Path(dir_path)
         if not path_dir.exists():
@@ -225,8 +314,18 @@ class PixarProcessor:
         for i, img in enumerate(images):
             img.save(Path(dir_path) / f"{i}.png")
 
-    @torch.no_grad()
     def render(self, text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]]) -> PixarEncoding:
+        """
+        Renders the input text into a PixarEncoding.
+
+        Args:
+            text (Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]]): 
+                The text to render. It can be a single string, a tuple of strings, 
+                or a list of strings/tuples.
+
+        Returns:
+            PixarEncoding: The rendered text as a PixarEncoding object, containing pixel values and patch information.
+        """
         if isinstance(text, list):
             rendered = [self.renderer(t) for t in text]
         else:
@@ -234,7 +333,7 @@ class PixarProcessor:
 
         pixel_values = torch.stack([torch.tensor(p.pixel_values.copy()) for p in rendered], dim=0)
         pixel_values = pixel_values.to(torch.float32).to(self.device) / 255
-        
+
         # change the channel dimension to the second dimension to fit the Conv2d operator
         if self.rgb:
             pixel_values = pixel_values.permute(0, 3, 1, 2)
@@ -257,17 +356,26 @@ class PixarProcessor:
         for sep in sep_patches:
             sep.sort()
 
-        if not isinstance(text, list):
-            text = [text]
+        attention_mask = create_attention_mask(
+            dims=(pixel_values.shape[0], self.max_seq_length // self.patch_len),
+            seq_lens=num_text_patches,
+            padding_side='right',
+        )
 
         return PixarEncoding(
             pixel_values=pixel_values.contiguous(), 
+            attention_mask=attention_mask,
             num_text_patches=num_text_patches, 
-            text=deepcopy(text), 
             sep_patches=sep_patches
         )
 
     def save_conf(self, dir_path: str):
+        """
+        Saves the processor's configuration to a JSON file named 'pixar_processor_conf.json'.
+
+        Args:
+            dir_path (str): The directory where the configuration file will be saved.
+        """
         conf_file = Path(dir_path) / "pixar_processor_conf.json"
         conf = {
             "font_file": self.font_file,
@@ -295,33 +403,65 @@ class PixarProcessor:
             json.dump(conf, f, indent=4, ensure_ascii=False)
 
     @classmethod
-    def load_conf(cls, dir_path: str) -> 'PixarProcessor':
+    def load_conf(cls, dir_path: str) -> "PixarProcessor":
+        """
+        Loads a PixarProcessor instance from a configuration file.
+
+        This is a class method and should be called on the class, e.g., `PixarProcessor.load_conf(...)`.
+
+        Args:
+            dir_path (str): The directory containing the 'pixar_processor_conf.json' file.
+
+        Returns:
+            PixarProcessor: An instance of the PixarProcessor created from the configuration file.
+        """
         conf_file = Path(dir_path) / "pixar_processor_conf.json"
         with open(conf_file, 'r') as f:
             conf = json.load(f)
         return cls(**conf)
 
     def slice(self, pixar_encoding: PixarEncoding, start: int, end: int) -> PixarEncoding:
+        """
+        Slices a PixarEncoding object to extract a sub-sequence of patches.
+
+        Args:
+            pixar_encoding (PixarEncoding): The PixarEncoding to slice.
+            start (int): The starting patch index (inclusive).
+            end (int): The ending patch index (exclusive).
+
+        Returns:
+            PixarEncoding: A new PixarEncoding object representing the sliced portion.
+        """
         block_len = self.pixels_per_patch * self.patch_len
         # N C H W
-        pixel_values = pixar_encoding.pixel_values[:, :, :, start*block_len:end*block_len]
-        num_text_patches = [
-            min(n - start, end - start) for n in pixar_encoding.num_text_patches
-        ]
-        text = deepcopy(pixar_encoding.text)
-        sep_patches = [[
-                s - start for s in seq if s >= start and s < end
-            ] for seq in pixar_encoding.sep_patches
+        pixel_values = pixar_encoding.pixel_values[:, :, :, start * block_len : end * block_len]
+        attention_mask = pixar_encoding.attention_mask[:, start:end]
+        num_text_patches = [min(n - start, end - start) for n in pixar_encoding.num_text_patches]
+        sep_patches = [
+            [s - start for s in seq if s >= start and s < end] for seq in pixar_encoding.sep_patches
         ]
 
         return PixarEncoding(
-            pixel_values=pixel_values.contiguous(), 
-            num_text_patches=num_text_patches, 
-            text=deepcopy(text), 
-            sep_patches=sep_patches
+            pixel_values=pixel_values.contiguous(),
+            attention_mask=attention_mask.contiguous(),
+            num_text_patches=num_text_patches,
+            sep_patches=sep_patches,
         )
 
     def insert(self, pixar_encoding: PixarEncoding, start: int, end: int, inserted: PixarEncoding) -> PixarEncoding:
+        """
+        Inserts one PixarEncoding into another within a specified patch range.
+
+        Args:
+            pixar_encoding (PixarEncoding): The base PixarEncoding object to be modified.
+            start (int): The starting patch index (inclusive) where the insertion begins.
+            end (int): The ending patch index (exclusive) where the insertion ends.
+            inserted (PixarEncoding): The PixarEncoding object to insert into the base encoding.
+
+        Returns:
+            PixarEncoding: A new PixarEncoding object with the `inserted` encoding placed
+                           within the specified range of the original encoding.
+        """
         block_len = self.pixels_per_patch * self.patch_len
         # N C H W
         pixel_values = pixar_encoding.pixel_values.clone()
@@ -329,7 +469,6 @@ class PixarProcessor:
         num_text_patches = [
             max(n1, start + n2) for n1, n2 in zip(pixar_encoding.num_text_patches, inserted.num_text_patches)
         ]
-        text = deepcopy(pixar_encoding.text)
         sep_patches = [[
                 s for s in seq1 if s < start or s >= end
             ] + [
@@ -339,10 +478,13 @@ class PixarProcessor:
         for seq in sep_patches:
             seq.sort()
 
+        attention_mask = pixar_encoding.attention_mask.clone()
+        attention_mask[:, start:end] = inserted.attention_mask
+
         return PixarEncoding(
-            pixel_values=pixel_values.contiguous(), 
+            pixel_values=pixel_values.contiguous(),
+            attention_mask=attention_mask.contiguous(),
             num_text_patches=num_text_patches, 
-            text=deepcopy(text), 
             sep_patches=sep_patches
         )
 
@@ -377,6 +519,17 @@ class PixarProcessor:
 
     @torch.no_grad()
     def reduce_white_space(self, pixar_encoding: PixarEncoding, max_white_space: int) -> PixarEncoding:
+        """
+        Reduces consecutive white pixel columns in a PixarEncoding to a specified maximum.
+
+        Args:
+            pixar_encoding (PixarEncoding): The input PixarEncoding.
+            max_white_space (int): The maximum number of consecutive white pixel columns to allow.
+
+        Returns:
+            PixarEncoding: A new PixarEncoding with reduced white space.
+        """
+
         reduced = pixar_encoding.clone()
         for i in range(reduced.pixel_values.shape[0]):
             self._reduce_white_space_at_i(reduced, i, max_white_space)
