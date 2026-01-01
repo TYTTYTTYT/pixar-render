@@ -80,9 +80,8 @@ processor = PixarProcessor(
     font_color="blue",               # Blue text
     background_color="lightyellow",  # Light yellow background
     pixels_per_patch=32,             # 32 pixels per patch instead of 24
-    max_seq_length=1024,             # Maximum sequence length
-    dpi=240,                         # Higher DPI for better quality
-    device='cuda:0'                  # Use GPU for processing
+    max_seq_length=1024,             # Maximum numer of patches
+    dpi=240                          # Higher DPI for better quality
 )
 
 text = "Custom styled text"
@@ -212,9 +211,8 @@ encoding = processor.render(text)
 # Reduce consecutive white pixels to maximum of 5
 compact_encoding = processor.reduce_white_space(encoding, max_white_space=5)
 
-# Compare image sizes
-images_before = processor.convert_to_pil(encoding)
-images_after = processor.convert_to_pil(compact_encoding)
+# Display the image
+processor.convert_to_pil(compact_encoding)[0]
 ```
 
 ### Saving and Loading Configuration
@@ -326,7 +324,7 @@ Dataclass containing:
 
 ## Requirements
 
-- Python >= 3.11
+- Python = 3.11
 - numpy
 - torch
 - torchvision
