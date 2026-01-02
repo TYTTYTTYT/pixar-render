@@ -1,7 +1,6 @@
-from .pangocairo_render import PangoCairoTextRenderer
-from .processor import PixarProcessor
+from .processor import PixarProcessor, PixarEncoding
 
 __all__ = [
-    'PangoCairoTextRenderer',
-    'PixarProcessor'
+    'PixarProcessor',
+    'PixarEncoding'
 ]
