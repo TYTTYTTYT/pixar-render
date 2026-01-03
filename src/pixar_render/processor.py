@@ -117,7 +117,7 @@ def create_attention_mask(
             attention_mask[i, :n] = 1
         else: # padding_side == 'left'
             attention_mask[i, -n:] = 1
-            
+
     return attention_mask
 
 
@@ -125,14 +125,12 @@ def create_attention_mask(
 class PixarEncoding:
     pixel_values: torch.Tensor
     attention_mask: torch.Tensor
-    num_text_patches: List[int]
     sep_patches: List[List[int]]
 
     def to(self, device: Union[str, int]) -> 'PixarEncoding':
         return PixarEncoding(
             pixel_values=self.pixel_values.to(device),
             attention_mask=self.attention_mask.to(device),
-            num_text_patches=deepcopy(self.num_text_patches),
             sep_patches=deepcopy(self.sep_patches),
         )
 
@@ -140,8 +138,16 @@ class PixarEncoding:
         return PixarEncoding(
             pixel_values=self.pixel_values.clone(),
             attention_mask=self.attention_mask.clone(),
-            num_text_patches=deepcopy(self.num_text_patches),
             sep_patches=deepcopy(self.sep_patches),
+        )
+
+    def __getitem__(self, index: slice | int) -> 'PixarEncoding':
+        if isinstance(index, int):
+            index = slice(index, index+1)
+        return PixarEncoding(
+            pixel_values=self.pixel_values[index],
+            attention_mask=self.attention_mask[index],
+            sep_patches=self.sep_patches[index],
         )
 
 
@@ -150,14 +156,15 @@ class PixarProcessor:
         self, 
         font_file: str = 'GoNotoCurrent.ttf',
         font_size: int = 8,
-        font_color: str = "black",
-        background_color: str = "white",
         binary: bool = False,
         rgb: bool = True,
         dpi: int = 180,
         pad_size: int = 3,
         pixels_per_patch: int = 24,
         max_seq_length: int = 529,
+        add_eos: bool = True,
+        padding_side: Literal['left', 'right'] = 'right',
+        truncate: bool = True,
         fallback_fonts_dir: str | None = None,
         patch_len: int = 1,
         contour_r: float = 0.0,
@@ -193,14 +200,15 @@ class PixarProcessor:
         """
         self.font_file = font_file
         self.font_size = font_size
-        self.font_color = font_color
-        self.background_color = background_color
         self.rgb = rgb
         self.binary = binary
         self.dpi = dpi
         self.pad_size = pad_size
         self.pixels_per_patch = pixels_per_patch
         self.max_seq_length = max_seq_length
+        self.add_eos = add_eos
+        self.padding_side = padding_side
+        self.truncate = truncate
         self.fallback_fonts_dir = fallback_fonts_dir
         self.patch_len = patch_len
         self.contour_r = contour_r
@@ -216,8 +224,6 @@ class PixarProcessor:
         self.renderer = PangoCairoTextRenderer(
             font_file,
             font_size,
-            font_color,
-            background_color,
             rgb,
             dpi,
             pad_size,
@@ -228,13 +234,20 @@ class PixarProcessor:
         )
 
         self._to_pil = ToPILImage(mode="RGB")
+        self._block_width = self.patch_len * self.pixels_per_patch
 
     def _binary(self, pixel_values: torch.Tensor) -> torch.Tensor:
         val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
         return (val > 0.5).to(torch.int64)
 
-    def __call__(self, text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]]):
-        return self.render(text)
+    def __call__(
+        self, 
+        text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]],
+        padding_side: Literal['left', 'right'] | None = None,
+        truncate: bool | None = None,
+        add_eos: bool | None = None
+    ) -> PixarEncoding:
+        return self.render(text, padding_side, truncate, add_eos)
 
     def _cal_sep_patches(self, sep_patches: List[int]) -> List[int]:
         sep_idxes = []
@@ -314,7 +327,13 @@ class PixarProcessor:
         for i, img in enumerate(images):
             img.save(Path(dir_path) / f"{i}.png")
 
-    def render(self, text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]]) -> PixarEncoding:
+    def render(
+        self, 
+        text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]],
+        padding_side: Literal['left', 'right'] | None = None,
+        truncate: bool | None = None,
+        add_eos: bool | None = None
+    ) -> PixarEncoding:
         """
         Renders the input text into a PixarEncoding.
 
@@ -322,10 +341,23 @@ class PixarProcessor:
             text (Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]]): 
                 The text to render. It can be a single string, a tuple of strings, 
                 or a list of strings/tuples.
+            padding_side (Literal['left', 'right'], optional): 
+                The side to pad the text on. Defaults to None.
+            truncate (bool, optional): 
+                Whether to truncate the text if it exceeds the maximum number of patches. Defaults to None.
+            add_eos (bool, optional): 
+                Whether to add an end-of-sequence token to the text. Defaults to None.
 
         Returns:
             PixarEncoding: The rendered text as a PixarEncoding object, containing pixel values and patch information.
         """
+        if padding_side is None:
+            padding_side = self.padding_side # type: ignore
+        if truncate is None:
+            truncate = self.truncate
+        if add_eos is None:
+            add_eos = self.add_eos
+
         if isinstance(text, list):
             rendered = [self.renderer(t) for t in text]
         else:
@@ -342,6 +374,7 @@ class PixarProcessor:
             pixel_values = pixel_values.unsqueeze(1)
             pixel_values = pixel_values.repeat(1, 3, 1, 1)
 
+        # dimension of pixel_values: [batch_size, channels, height, width]
         if self.binary:
             val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
             pixel_values = (val > 0.5).to(torch.int64)
@@ -356,69 +389,50 @@ class PixarProcessor:
         for sep in sep_patches:
             sep.sort()
 
+        # remove EOS patches if no need
+        if not add_eos:
+            for idx in range(pixel_values.shape[0]):
+                if sep_patches[idx][-1] == num_text_patches[idx] - 1:
+                    num_text_patches[idx] -= 1
+                for sep_idx in sep_patches[idx]:
+                    begin_idx = sep_idx * self._block_width
+                    end_idx = begin_idx + self._block_width
+                    pixel_values[idx, :, :, begin_idx:end_idx] = 1
+                sep_patches[idx] = []
+
+        # truncate if needed
+        max_num_patches = max(num_text_patches)
+        if truncate:
+            pixel_width = max_num_patches * self._block_width
+            pixel_values = pixel_values[:, :, :, :pixel_width]
+
+        # change padding_side if needed
+        if padding_side == 'left':
+            for idx, n in enumerate(num_text_patches):
+                if n == max_num_patches:
+                    continue
+                text_pixel_width = n * self._block_width
+                tmp = torch.empty_like(pixel_values[idx])
+                tmp[:, :, -text_pixel_width:] = pixel_values[idx, :, :, :text_pixel_width]
+                tmp[:, :, :-text_pixel_width] = pixel_values[idx, :, :, text_pixel_width:]
+                pixel_values[idx] = tmp
+                for i in range(len(sep_patches[idx])):
+                    sep_patches[idx][i] = sep_patches[idx][i] + max_num_patches - n
+        else:
+            if padding_side != 'right':
+                raise ValueError(f"padding_side must be 'left' or 'right', but got {padding_side}")
+
         attention_mask = create_attention_mask(
-            dims=(pixel_values.shape[0], self.max_seq_length // self.patch_len),
+            dims=(pixel_values.shape[0], max_num_patches),
             seq_lens=num_text_patches,
-            padding_side='right',
+            padding_side=padding_side   # type: ignore
         )
 
         return PixarEncoding(
-            pixel_values=pixel_values.contiguous(), 
+            pixel_values=pixel_values.contiguous(),
             attention_mask=attention_mask,
-            num_text_patches=num_text_patches, 
             sep_patches=sep_patches
         )
-
-    def save_conf(self, dir_path: str):
-        """
-        Saves the processor's configuration to a JSON file named 'pixar_processor_conf.json'.
-
-        Args:
-            dir_path (str): The directory where the configuration file will be saved.
-        """
-        conf_file = Path(dir_path) / "pixar_processor_conf.json"
-        conf = {
-            "font_file": self.font_file,
-            "font_size": self.font_size,
-            "font_color": self.font_color,
-            "background_color": self.background_color,
-            "rgb": self.rgb,
-            "binary": self.binary,
-            "dpi": self.dpi,
-            "pad_size": self.pad_size,
-            "pixels_per_patch": self.pixels_per_patch,
-            "max_seq_length": self.max_seq_length,
-            "fallback_fonts_dir": self.fallback_fonts_dir,
-            "patch_len": self.patch_len,
-            "contour_r": self.contour_r,
-            "contour_g": self.contour_g,
-            "contour_b": self.contour_b,
-            "contour_alpha": self.contour_alpha,
-            'contour_width': self.contour_width,
-            "device": self.device,
-        }
-        if not conf_file.parent.exists():
-            conf_file.parent.mkdir(parents=True)
-        with open(conf_file, 'w') as f:
-            json.dump(conf, f, indent=4, ensure_ascii=False)
-
-    @classmethod
-    def load_conf(cls, dir_path: str) -> "PixarProcessor":
-        """
-        Loads a PixarProcessor instance from a configuration file.
-
-        This is a class method and should be called on the class, e.g., `PixarProcessor.load_conf(...)`.
-
-        Args:
-            dir_path (str): The directory containing the 'pixar_processor_conf.json' file.
-
-        Returns:
-            PixarProcessor: An instance of the PixarProcessor created from the configuration file.
-        """
-        conf_file = Path(dir_path) / "pixar_processor_conf.json"
-        with open(conf_file, 'r') as f:
-            conf = json.load(f)
-        return cls(**conf)
 
     def slice(self, pixar_encoding: PixarEncoding, start: int, end: int) -> PixarEncoding:
         """
@@ -436,7 +450,6 @@ class PixarProcessor:
         # N C H W
         pixel_values = pixar_encoding.pixel_values[:, :, :, start * block_len : end * block_len]
         attention_mask = pixar_encoding.attention_mask[:, start:end]
-        num_text_patches = [min(n - start, end - start) for n in pixar_encoding.num_text_patches]
         sep_patches = [
             [s - start for s in seq if s >= start and s < end] for seq in pixar_encoding.sep_patches
         ]
@@ -444,7 +457,6 @@ class PixarProcessor:
         return PixarEncoding(
             pixel_values=pixel_values.contiguous(),
             attention_mask=attention_mask.contiguous(),
-            num_text_patches=num_text_patches,
             sep_patches=sep_patches,
         )
 
@@ -466,9 +478,6 @@ class PixarProcessor:
         # N C H W
         pixel_values = pixar_encoding.pixel_values.clone()
         pixel_values[:, :, :, start*block_len:end*block_len] = inserted.pixel_values
-        num_text_patches = [
-            max(n1, start + n2) for n1, n2 in zip(pixar_encoding.num_text_patches, inserted.num_text_patches)
-        ]
         sep_patches = [[
                 s for s in seq1 if s < start or s >= end
             ] + [
@@ -484,53 +493,87 @@ class PixarProcessor:
         return PixarEncoding(
             pixel_values=pixel_values.contiguous(),
             attention_mask=attention_mask.contiguous(),
-            num_text_patches=num_text_patches, 
             sep_patches=sep_patches
         )
 
-    def _reduce_white_space_at_i(self, pixar_encoding: PixarEncoding, i: int, max_space: int) -> None:
-        if pixar_encoding.num_text_patches[i] - 1 not in pixar_encoding.sep_patches[i]:
-            last_idx = pixar_encoding.num_text_patches[i] - 1
-        else:
-            last_idx = pixar_encoding.num_text_patches[i] - 1
-            while last_idx in pixar_encoding.sep_patches[i]:
-                last_idx -= 1
-                if last_idx < 0:
-                    raise ValueError("No text token before the SEP token.")
-
-        block_len = self.pixels_per_patch * self.patch_len
-        last_pixel = last_idx * self.pixels_per_patch * self.patch_len + block_len - 1
-        space_dist = 0
-        while (pixar_encoding.pixel_values[i, :, :, last_pixel] == 1.0).all():
-            last_pixel -= 1
-            space_dist += 1
-            if last_pixel < 0:
-                raise ValueError('No non-white content in this image.')
-
-        if space_dist <= max_space:
-            return
-
-        shift_dist = space_dist - max_space
-
-        # N, W, C, H
-        pixar_encoding.pixel_values[i, :, :, shift_dist:last_pixel+shift_dist+1] = \
-            pixar_encoding.pixel_values.clone()[i, :, :, 0:last_pixel+1]
-        pixar_encoding.pixel_values[i, :, :, 0:shift_dist] = 1.0
-
-    @torch.no_grad()
-    def reduce_white_space(self, pixar_encoding: PixarEncoding, max_white_space: int) -> PixarEncoding:
+    def append(self, pixar_encoding: PixarEncoding, inserted: PixarEncoding) -> PixarEncoding:
         """
-        Reduces consecutive white pixel columns in a PixarEncoding to a specified maximum.
+        Appends one PixarEncoding to the end of another.
+        Args:
+            pixar_encoding (PixarEncoding): The base PixarEncoding object to be modified.
+            inserted (PixarEncoding): The PixarEncoding object to append to the base encoding.
+        """
+        pixel_values = torch.cat([pixar_encoding.pixel_values, inserted.pixel_values], dim=-1)
+        attention_mask = torch.cat([pixar_encoding.attention_mask, inserted.attention_mask], dim=-1)
+        seq_patches = deepcopy(pixar_encoding.sep_patches)
+        l = pixar_encoding.pixel_values.shape[-1] // self._block_width
+        for idx, seq in enumerate(inserted.sep_patches):
+            seq_patches[idx].extend([s + l for s in seq])
+
+        return PixarEncoding(pixel_values, attention_mask, seq_patches)
+
+    def _align_text_to_right_edge_at_i(self, i: int, pixar_encoding: PixarEncoding, max_dist_to_edge: int) -> PixarEncoding:
+        """
+        Aligns the text in the PixarEncoding object to the right edge at the specified batch index.
 
         Args:
-            pixar_encoding (PixarEncoding): The input PixarEncoding.
-            max_white_space (int): The maximum number of consecutive white pixel columns to allow.
+            i (int): The batch index where the text alignment should occur.
+            pixar_encoding (PixarEncoding): The PixarEncoding object to be modified.
+            max_dist_to_edge (int): The maximum number of white pixels from the right edge.
 
         Returns:
-            PixarEncoding: A new PixarEncoding with reduced white space.
+            PixarEncoding: A new PixarEncoding object with the text aligned to the right edge at index `i`.
         """
+        # C, H, W
+        pixel_values = pixar_encoding.pixel_values[i].clone()
+        right_edge_patch_idx = int(pixar_encoding.attention_mask[i].nonzero().max().item())
+        if right_edge_patch_idx in pixar_encoding.sep_patches[i]:
+            right_edge_patch_idx -= 1
 
-        reduced = pixar_encoding.clone()
-        for i in range(reduced.pixel_values.shape[0]):
-            self._reduce_white_space_at_i(reduced, i, max_white_space)
-        return reduced
+        right_edge_pixel_idx = (right_edge_patch_idx + 1) * self._block_width - 1
+        current_column_idx = right_edge_pixel_idx
+        while pixel_values[:, :, current_column_idx].mean().item() == 1.0 and current_column_idx > 0:
+            current_column_idx -= 1
+
+        dist_to_edge = right_edge_pixel_idx - current_column_idx
+        if current_column_idx == 0 or dist_to_edge <= max_dist_to_edge:
+            return pixar_encoding
+
+        dist_to_move = dist_to_edge if dist_to_edge <= max_dist_to_edge else dist_to_edge - max_dist_to_edge
+
+        num_text_pixel = current_column_idx + 1
+        pixar_encoding.pixel_values[i, :, :, dist_to_move:dist_to_move+num_text_pixel] = pixel_values[:, :, :num_text_pixel]
+        pixar_encoding.pixel_values[i, :, :, :dist_to_move] = 1.0
+
+        return pixar_encoding
+
+    def align_text_to_right_edge_(self, pixar_encoding: PixarEncoding, max_dist_to_edge: int) -> PixarEncoding:
+        """
+        Aligns the text in the PixarEncoding object to the right edge for each batch.
+
+        Args:
+            pixar_encoding (PixarEncoding): The PixarEncoding object to be modified.
+            max_white_space (int): The maximum number of white pixels from the right edge.
+
+        Returns:
+            PixarEncoding: A new PixarEncoding object with the text aligned to the right edge for each batch.
+        """
+        for i in range(pixar_encoding.pixel_values.shape[0]):
+            pixar_encoding = self._align_text_to_right_edge_at_i(i, pixar_encoding, max_dist_to_edge)
+        return pixar_encoding
+
+    def align_text_to_right_edge(self, pixar_encoding: PixarEncoding, max_dist_to_edge: int) -> PixarEncoding:
+        """
+        Aligns the text in the PixarEncoding object to the right edge for each batch.
+
+        Args:
+            pixar_encoding (PixarEncoding): The PixarEncoding object to be modified.
+            max_white_space (int): The maximum number of white pixels from the right edge.
+
+        Returns:
+            PixarEncoding: A new PixarEncoding object with the text aligned to the right edge for each batch.
+        """
+        pixar_encoding = pixar_encoding.clone()
+        for i in range(pixar_encoding.pixel_values.shape[0]):
+            pixar_encoding = self._align_text_to_right_edge_at_i(i, pixar_encoding, max_dist_to_edge)
+        return pixar_encoding

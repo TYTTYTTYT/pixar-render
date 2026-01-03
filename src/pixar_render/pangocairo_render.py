@@ -143,8 +143,6 @@ class PangoCairoTextRenderer():
         self,
         font_file: str = 'GoNotoCurrent.ttf',
         font_size: int = 8,
-        font_color: str = "black",
-        background_color: str = "white",
         rgb: bool = False,
         dpi: int = 120,
         pad_size: int = 3,
@@ -159,8 +157,8 @@ class PangoCairoTextRenderer():
             font_file = get_font_path(font_file)
         self.font_file = font_file
         self.font_size = font_size
-        self.font_color = font_color
-        self.background_color = background_color
+        self.font_color = 'black'
+        self.background_color = 'white'
         self.rgb = rgb
 
         self.pixels_per_patch = pixels_per_patch
