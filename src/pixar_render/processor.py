@@ -545,6 +545,17 @@ class PixarProcessor:
         pixar_encoding.pixel_values[i, :, :, dist_to_move:dist_to_move+num_text_pixel] = pixel_values[:, :, :num_text_pixel]
         pixar_encoding.pixel_values[i, :, :, :dist_to_move] = 1.0
 
+        # scan for begining white patches and set their attention mask to 0
+        _, _, W = pixar_encoding.pixel_values[i].shape
+        num_blocks = W // self._block_width
+        for j in range(num_blocks):
+            start = j * self._block_width
+            end = start + self._block_width
+            if pixar_encoding.pixel_values[i, :, :, start:end].mean().item() == 1.0:
+                pixar_encoding.attention_mask[i, j] = 0
+            else:
+                break
+
         return pixar_encoding
 
     def align_text_to_right_edge_(self, pixar_encoding: PixarEncoding, max_dist_to_edge: int) -> PixarEncoding:
