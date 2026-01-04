@@ -377,7 +377,7 @@ class PixarProcessor:
         # dimension of pixel_values: [batch_size, channels, height, width]
         if self.binary:
             val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
-            pixel_values = (val > 0.5).to(torch.int64)
+            pixel_values = (val > 0.5).to(torch.float)
 
         num_text_patches = [
             ceil((p.num_text_patches + 1) / self.patch_len) for p in rendered
