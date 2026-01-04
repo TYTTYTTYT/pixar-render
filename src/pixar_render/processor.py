@@ -238,7 +238,7 @@ class PixarProcessor:
 
     def _binary(self, pixel_values: torch.Tensor) -> torch.Tensor:
         val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
-        return (val > 0.5).to(torch.int64)
+        return (val > 0.5).to(torch.float)
 
     def __call__(
         self, 
@@ -284,9 +284,9 @@ class PixarProcessor:
 
     @torch.no_grad()
     def convert_to_pil(
-        self, 
-        pixar_encoding: PixarEncoding, 
-        square: bool = True, 
+        self,
+        pixar_encoding: PixarEncoding,
+        square: bool = True,
         contour: bool = False
     ) -> List[Image.Image]:
         """
