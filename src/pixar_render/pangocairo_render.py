@@ -1519,9 +1519,55 @@ class PangoCairoTextRenderer():
     def load_font(self) -> None:
         """
         Loads the font from specified font file with specified font size and color.
+
+        If ``fallback_fonts_dir`` is set, fontconfig is reinitialised so that
+        **only** the fonts in that directory (plus the primary font registered
+        via *manimpango*) are available to Pango.  This guarantees that the same
+        fallback fonts are used regardless of what is installed on the host
+        system.
         """
 
         logger.info(f"Loading font from {self.font_file}")
+
+        # If fallback_fonts_dir is set, reinitialize fontconfig with a custom
+        # configuration that ONLY includes our fallback fonts directory.
+        # This ensures consistent rendering across different systems.
+        if self.fallback_fonts_dir is not None:
+            import ctypes, ctypes.util, tempfile
+            fallback_abs = os.path.abspath(self.fallback_fonts_dir)
+            # Create a minimal fontconfig config with only our fallback dir
+            fonts_conf = (
+                '<?xml version="1.0"?>\n'
+                '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n'
+                '<fontconfig>\n'
+                f'  <dir>{fallback_abs}</dir>\n'
+                f'  <cachedir>/tmp/pixar-fc-cache</cachedir>\n'
+                '</fontconfig>\n'
+            )
+            conf_file = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.conf', prefix='pixar_fontconfig_', delete=False
+            )
+            conf_file.write(fonts_conf)
+            conf_file.close()
+            # Use fontconfig C API to fully reinitialize with our config
+            fc_lib_path = ctypes.util.find_library('fontconfig')
+            if fc_lib_path:
+                fc = ctypes.CDLL(fc_lib_path)
+                os.environ['FONTCONFIG_FILE'] = conf_file.name
+                # FcFini + FcInit fully resets fontconfig to read new config
+                fc.FcFini()
+                fc.FcInit()
+                # Create a new PangoCairo fontmap that uses the new fontconfig
+                # and set it as the default so PangoCairo.create_layout() uses it
+                new_fontmap = PangoCairo.font_map_new()
+                new_fontmap.set_default()
+                logger.info(
+                    f"Reinitialized fontconfig with {conf_file.name} "
+                    f"(fallback dir: {fallback_abs}), "
+                    f"available families: {len(new_fontmap.list_families())}"
+                )
+            else:
+                logger.warning("Could not find fontconfig library, fallback fonts may not work")
 
         manimpango.register_font(self.font_file) # type: ignore
         if self.fallback_fonts_dir is not None:
