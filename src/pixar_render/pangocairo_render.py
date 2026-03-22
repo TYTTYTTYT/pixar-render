@@ -1530,16 +1530,19 @@ class PangoCairoTextRenderer():
         logger.info(f"Loading font from {self.font_file}")
 
         # If fallback_fonts_dir is set, reinitialize fontconfig with a custom
-        # configuration that ONLY includes our fallback fonts directory.
-        # This ensures consistent rendering across different systems.
+        # configuration that ONLY includes the primary font's directory and our
+        # fallback fonts directory.  This ensures consistent rendering across
+        # different systems.
         if self.fallback_fonts_dir is not None:
             import ctypes, ctypes.util, tempfile
             fallback_abs = os.path.abspath(self.fallback_fonts_dir)
-            # Create a minimal fontconfig config with only our fallback dir
+            primary_font_dir = os.path.dirname(os.path.abspath(self.font_file))
+            # Create a fontconfig config with the primary font dir and fallback dir
             fonts_conf = (
                 '<?xml version="1.0"?>\n'
                 '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n'
                 '<fontconfig>\n'
+                f'  <dir>{primary_font_dir}</dir>\n'
                 f'  <dir>{fallback_abs}</dir>\n'
                 f'  <cachedir>/tmp/pixar-fc-cache</cachedir>\n'
                 '</fontconfig>\n'
