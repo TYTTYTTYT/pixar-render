@@ -60,7 +60,14 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_INPUT_TYPES = [str, Tuple[str, str], List[str]]
 
-def get_font_path(font: str) -> str:
+def get_font_path(font: str, fallback_fonts_dir: Optional[str] = None) -> str:
+    # Resolve a font given by name. Search the fallback fonts directory first (so a
+    # bundled/saved primary font travelling inside the fallback dir is picked up),
+    # then fall back to the package's built-in resources/fonts directory.
+    if fallback_fonts_dir is not None:
+        candidate = Path(fallback_fonts_dir) / font
+        if candidate.is_file():
+            return str(candidate)
     path = Path(str(resources.files('pixar_render').joinpath(f'resources/fonts/{font}')))
     if not path.is_file():
         logger.error((f'Font file "{font}" not found! Please check the directory {path.parent.absolute().__str__()}.'))
@@ -154,7 +161,7 @@ class PangoCairoTextRenderer():
         super().__init__()
 
         if not Path(font_file).is_file():
-            font_file = get_font_path(font_file)
+            font_file = get_font_path(font_file, fallback_fonts_dir)
         self.font_file = font_file
         self.font_size = font_size
         self.font_color = 'black'
