@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import functools
 import inspect
 
+import numpy as np
 import torch
 from torchvision.transforms import ToPILImage
 from PIL import Image
@@ -196,7 +197,9 @@ class PixarProcessor:
             contour_b (float): Blue component of the contour color.
             contour_alpha (float): Alpha component of the contour color.
             contour_width (int): Width of the contour.
-            device (Union[str, int]): Device to use for processing ('cpu' or GPU index).
+            device (Union[str, int]): Deprecated and ignored. render() now returns raw
+                uint8 pixel values on the CPU; move them to a device yourself (e.g. via
+                PixarEncoding.to(device)) or let your training framework do it on the GPU.
         """
         self.font_file = font_file
         self.font_size = font_size
@@ -237,8 +240,8 @@ class PixarProcessor:
         self._block_width = self.patch_len * self.pixels_per_patch
 
     def _binary(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
-        return (val > 0.5).to(torch.float)
+        val = pixel_values.float().mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+        return (val > 127.5).to(torch.uint8) * 255
 
     def __call__(
         self, 
@@ -301,12 +304,15 @@ class PixarProcessor:
             List[Image.Image]: A list of converted PIL Images.
         """
         pixel_values = pixar_encoding.pixel_values
+        # The contour blending works in the float [0, 1] domain, so normalise here.
+        # Accept either the uint8 [0, 255] render() output or float [0, 1] input.
+        if pixel_values.dtype == torch.uint8:
+            pixel_values = pixel_values.float() / 255
         if contour:
             pixel_values = self._add_contour(pixel_values)
         if square:
             pixel_values = self._squarelize(pixel_values)
-        pixel_values = pixel_values * 255
-        pixel_values = pixel_values.to(torch.uint8)
+        pixel_values = (pixel_values * 255).to(torch.uint8)
         images = [self._to_pil(p) for p in pixel_values]
         return images
 
@@ -363,25 +369,53 @@ class PixarProcessor:
         else:
             rendered = [self.renderer(text)]
 
-        pixel_values = torch.stack([torch.tensor(p.pixel_values.copy()) for p in rendered], dim=0)
-        pixel_values = pixel_values.to(torch.float32).to(self.device) / 255
-
-        # change the channel dimension to the second dimension to fit the Conv2d operator
-        if self.rgb:
-            pixel_values = pixel_values.permute(0, 3, 1, 2)
-        else:
-            # we repeat values 3 times to fit the Conv2d operator
-            pixel_values = pixel_values.unsqueeze(1)
-            pixel_values = pixel_values.repeat(1, 3, 1, 1)
-
-        # dimension of pixel_values: [batch_size, channels, height, width]
-        if self.binary:
-            val = pixel_values.mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
-            pixel_values = (val > 0.5).to(torch.float)
-
         num_text_patches = [
             ceil((p.num_text_patches + 1) / self.patch_len) for p in rendered
         ]
+        max_num_patches = max(num_text_patches)
+
+        # The renderer always draws onto a full `max_seq_length`-wide surface, but
+        # when truncating only the first `max_num_patches` patches ever survive
+        # (often <5% of the width for short inputs). Converting the whole surface to
+        # a float tensor and discarding the rest afterwards used to dominate runtime,
+        # so slice down to the needed width *before* the expensive float conversion.
+        if truncate:
+            conv_width = max_num_patches * self._block_width
+        else:
+            conv_width = rendered[0].pixel_values.shape[1]
+
+        # `p.pixel_values` is a non-contiguous numpy view (negative-strided BGR->RGB),
+        # so build one contiguous batch and hand it to torch via from_numpy (a view,
+        # no extra copy) instead of stacking per-item torch.tensor(copy()) calls.
+        # We arrange the channel dimension into the final [B, C, H, W] layout here in
+        # numpy so from_numpy hands back a contiguous tensor with no extra torch copy.
+        #
+        # Pixels are returned as raw uint8 in [0, 255] on the CPU. Normalisation
+        # (/255), float conversion and device placement are intentionally left to the
+        # caller (e.g. the training framework) so they can run on the target GPU and
+        # so render() works cleanly inside DataLoader worker processes.
+        if self.rgb:
+            batch = np.stack(
+                [np.ascontiguousarray(p.pixel_values[:, :conv_width, :]) for p in rendered]
+            )
+            # [B, H, W, C] -> [B, C, H, W] to fit the Conv2d operator
+            batch = np.ascontiguousarray(batch.transpose(0, 3, 1, 2))
+        else:
+            batch = np.stack(
+                [np.ascontiguousarray(p.pixel_values[:, :conv_width]) for p in rendered]
+            )
+            # [B, H, W] -> [B, 3, H, W]; repeat the single channel to fit Conv2d
+            batch = np.ascontiguousarray(
+                np.broadcast_to(batch[:, None, :, :], (batch.shape[0], 3, *batch.shape[1:]))
+            )
+        pixel_values = torch.from_numpy(batch)
+
+        # dimension of pixel_values: [batch_size, channels, height, width], uint8 [0, 255]
+        if self.binary:
+            val = pixel_values.float().mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+            # stay in the uint8 domain: white (255) where bright, black (0) otherwise
+            pixel_values = (val > 127.5).to(torch.uint8) * 255
+
         sep_patches = [
             self._cal_sep_patches(p.sep_patches) for p in rendered
         ]
@@ -397,7 +431,7 @@ class PixarProcessor:
                 for sep_idx in sep_patches[idx]:
                     begin_idx = sep_idx * self._block_width
                     end_idx = begin_idx + self._block_width
-                    pixel_values[idx, :, :, begin_idx:end_idx] = 1
+                    pixel_values[idx, :, :, begin_idx:end_idx] = 255  # white (uint8)
                 sep_patches[idx] = []
 
         # truncate if needed
@@ -526,13 +560,15 @@ class PixarProcessor:
         """
         # C, H, W
         pixel_values = pixar_encoding.pixel_values[i].clone()
+        # white value depends on the pixel dtype: 255 for uint8 render() output, 1.0 for float
+        white = 255 if pixel_values.dtype == torch.uint8 else 1.0
         right_edge_patch_idx = int(pixar_encoding.attention_mask[i].nonzero().max().item())
         if right_edge_patch_idx in pixar_encoding.sep_patches[i]:
             right_edge_patch_idx -= 1
 
         right_edge_pixel_idx = (right_edge_patch_idx + 1) * self._block_width - 1
         current_column_idx = right_edge_pixel_idx
-        while pixel_values[:, :, current_column_idx].mean().item() == 1.0 and current_column_idx > 0:
+        while pixel_values[:, :, current_column_idx].float().mean().item() == white and current_column_idx > 0:
             current_column_idx -= 1
 
         dist_to_edge = right_edge_pixel_idx - current_column_idx
@@ -543,7 +579,7 @@ class PixarProcessor:
 
         num_text_pixel = current_column_idx + 1
         pixar_encoding.pixel_values[i, :, :, dist_to_move:dist_to_move+num_text_pixel] = pixel_values[:, :, :num_text_pixel]
-        pixar_encoding.pixel_values[i, :, :, :dist_to_move] = 1.0
+        pixar_encoding.pixel_values[i, :, :, :dist_to_move] = white
 
         # scan for begining white patches and set their attention mask to 0
         _, _, W = pixar_encoding.pixel_values[i].shape
@@ -551,7 +587,7 @@ class PixarProcessor:
         for j in range(num_blocks):
             start = j * self._block_width
             end = start + self._block_width
-            if pixar_encoding.pixel_values[i, :, :, start:end].mean().item() == 1.0:
+            if pixar_encoding.pixel_values[i, :, :, start:end].float().mean().item() == white:
                 pixar_encoding.attention_mask[i, j] = 0
             else:
                 break
