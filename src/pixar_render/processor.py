@@ -3,6 +3,7 @@ Processor for Pixar Render
 """
 from typing import Union, List, Tuple, Callable, ParamSpec, TypeVar, Literal
 import json
+import shutil
 from pathlib import Path
 from math import ceil, sqrt
 from copy import deepcopy
@@ -333,8 +334,94 @@ class PixarProcessor:
         for i, img in enumerate(images):
             img.save(Path(dir_path) / f"{i}.png")
 
+    CONF_FILENAME = "pixar_processor_conf.json"
+
+    def _config(self) -> dict:
+        """Return all constructor settings of this processor as a plain dict."""
+        return {
+            "font_file": self.font_file,
+            "font_size": self.font_size,
+            "binary": self.binary,
+            "rgb": self.rgb,
+            "dpi": self.dpi,
+            "pad_size": self.pad_size,
+            "pixels_per_patch": self.pixels_per_patch,
+            "max_seq_length": self.max_seq_length,
+            "add_eos": self.add_eos,
+            "padding_side": self.padding_side,
+            "truncate": self.truncate,
+            "fallback_fonts_dir": self.fallback_fonts_dir,
+            "patch_len": self.patch_len,
+            "contour_r": self.contour_r,
+            "contour_g": self.contour_g,
+            "contour_b": self.contour_b,
+            "contour_alpha": self.contour_alpha,
+            "contour_width": self.contour_width,
+            "device": self.device,
+        }
+
+    def save(self, dir_path: str) -> None:
+        """
+        Saves all settings of this processor to ``<dir_path>/pixar_processor_conf.json``.
+
+        If ``fallback_fonts_dir`` is set, every font in it is copied into a ``fonts``
+        subdirectory of ``dir_path``, along with the resolved primary font, so the saved
+        configuration is fully self-contained and reproduces identical rendering on any
+        machine (no reliance on system fonts or external paths). The stored config then
+        points ``fallback_fonts_dir`` at the bundled ``fonts`` directory (relative) and
+        refers to the primary font by name, which ``load`` resolves from that directory.
+
+        Args:
+            dir_path (str): Directory to save the configuration (and bundled fonts) to.
+        """
+        dst = Path(dir_path)
+        dst.mkdir(parents=True, exist_ok=True)
+        config = self._config()
+
+        if self.fallback_fonts_dir is not None:
+            fonts_dir = dst / "fonts"
+            fonts_dir.mkdir(parents=True, exist_ok=True)
+            # Copy every fallback font (matching the same "*tf" glob used at load time)
+            for font in sorted(Path(self.fallback_fonts_dir).glob("*tf")):
+                shutil.copy(font, fonts_dir / font.name)
+            # Copy the resolved primary font into the bundle too, so it travels with the
+            # fallback dir and can be found by name when loading.
+            primary = Path(self.renderer.font_file)
+            primary_dst = fonts_dir / primary.name
+            if not primary_dst.exists():
+                shutil.copy(primary, primary_dst)
+            config["fallback_fonts_dir"] = "fonts"
+            config["font_file"] = primary.name
+
+        with open(dst / self.CONF_FILENAME, "w", encoding="utf-8") as fp:
+            json.dump(config, fp, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, dir_path: str) -> "PixarProcessor":
+        """
+        Restores a ``PixarProcessor`` from a directory previously written by ``save``.
+
+        A bundled (relative) ``fallback_fonts_dir`` is resolved back to an absolute path
+        inside ``dir_path`` so the primary and fallback fonts are loaded from the bundle.
+
+        Args:
+            dir_path (str): Directory containing ``pixar_processor_conf.json``.
+
+        Returns:
+            PixarProcessor: A processor reconstructed with the saved settings.
+        """
+        src = Path(dir_path)
+        with open(src / cls.CONF_FILENAME, "r", encoding="utf-8") as fp:
+            config = json.load(fp)
+
+        fallback = config.get("fallback_fonts_dir")
+        if fallback is not None and not Path(fallback).is_absolute():
+            config["fallback_fonts_dir"] = str((src / fallback).resolve())
+
+        return cls(**config)
+
     def render(
-        self, 
+        self,
         text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]],
         padding_side: Literal['left', 'right'] | None = None,
         truncate: bool | None = None,
