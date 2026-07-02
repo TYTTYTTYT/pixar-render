@@ -46,6 +46,7 @@ encoding = processor.render(text)
 
 # Access the pixel values and attention mask
 print(encoding.pixel_values.shape)  # torch.Tensor: [batch_size, channels, height, width]
+print(encoding.pixel_values.dtype)  # torch.uint8, raw pixels in [0, 255] on CPU (see note below)
 print(encoding.attention_mask.shape)  # torch.Tensor: [batch_size, seq_length]
 print(encoding.num_text_patches)  # List of patch counts per text
 ```
@@ -242,23 +243,27 @@ loaded_processor = PixarProcessor.load_conf("./config")
 import torch
 from pixar_render import PixarProcessor
 
-processor = PixarProcessor(device='cuda:0')
+processor = PixarProcessor()
 
-# Render text
+# Render text -> raw uint8 pixels in [0, 255] on the CPU
 texts = ["Training sample 1", "Training sample 2"]
 encoding = processor.render(texts)
 
-# Move to device
-encoding = encoding.to('cuda:0')
-
-# Use in your model
-# pixel_values: [batch_size, 3, height, width]
+# Normalisation and device placement are left to you (do them on the GPU).
+# pixel_values: uint8 [batch_size, 3, height, width]
 # attention_mask: [batch_size, seq_length]
+pixel_values = encoding.pixel_values.to('cuda:0').float() / 255
 output = your_vision_model(
-    pixel_values=encoding.pixel_values,
-    attention_mask=encoding.attention_mask
+    pixel_values=pixel_values,
+    attention_mask=encoding.attention_mask.to('cuda:0'),
 )
 ```
+
+> **Note (v0.2.0, breaking change):** `render()` returns raw `uint8` pixel values in
+> `[0, 255]` on the CPU. It no longer normalises to float `[0, 1]` or moves tensors to a
+> device — do that in your training framework so it can run on the target GPU and inside
+> `DataLoader` worker processes. To reproduce the old output: `encoding.pixel_values.float() / 255`.
+> The `device` constructor argument is deprecated and ignored.
 
 ### Binary Mode
 
@@ -271,7 +276,7 @@ processor = PixarProcessor(binary=True)
 text = "Binary rendered text"
 encoding = processor.render(text)
 
-# Pixel values will be 0 or 1
+# Pixel values will be 0 or 255 (uint8); divide by 255 for {0, 1}
 images = processor.convert_to_pil(encoding)
 images[0].save("binary_output.png")
 ```
@@ -298,7 +303,7 @@ images[0].save("binary_output.png")
 - `contour_b` (float): Blue component of contour (default: 0.0)
 - `contour_alpha` (float): Contour transparency (default: 0.7)
 - `contour_width` (int): Contour line width (default: 1)
-- `device` (str | int): Processing device (default: 'cpu')
+- `device` (str | int): Deprecated and ignored (default: 'cpu'). render() returns CPU uint8; move tensors yourself.
 
 **Methods:**
 - `render(text)`: Render text to PixarEncoding
@@ -313,7 +318,7 @@ images[0].save("binary_output.png")
 ### PixarEncoding
 
 Dataclass containing:
-- `pixel_values` (torch.Tensor): Rendered pixel values [batch, channels, height, width]
+- `pixel_values` (torch.Tensor): Rendered pixel values, uint8 in [0, 255] on CPU, [batch, channels, height, width]
 - `attention_mask` (torch.Tensor): Attention mask [batch, seq_length]
 - `num_text_patches` (List[int]): Number of text patches per sample
 - `sep_patches` (List[List[int]]): Separator patch positions per sample
