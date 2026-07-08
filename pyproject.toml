@@ -3,13 +3,13 @@ requires = ["setuptools", "wheel"]
 
 [project]
 name = "Pixar-Render"
-version = "0.3.0"
+version = "0.3.1"
 authors = [
   { name="Yintao Tai", email="tai.yintao@gmail.com" },
 ]
 description = "Provide rendering functions for project PIXAR."
 readme = "README.md"
-requires-python = "==3.11.*"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
