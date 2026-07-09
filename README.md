@@ -48,7 +48,7 @@ encoding = processor.render(text)
 print(encoding.pixel_values.shape)  # torch.Tensor: [batch_size, channels, height, width]
 print(encoding.pixel_values.dtype)  # torch.uint8, raw pixels in [0, 255] on CPU (see note below)
 print(encoding.attention_mask.shape)  # torch.Tensor: [batch_size, seq_length]
-print(encoding.num_text_patches)  # List of patch counts per text
+print(encoding.attention_mask.sum(dim=1))  # number of non-padding patches per text
 ```
 
 ### Batch Processing
@@ -66,8 +66,8 @@ texts = [
 ]
 encoding = processor.render(texts)
 
-print(encoding.pixel_values.shape)  # [3, 3, 24, 12696]
-print(encoding.num_text_patches)  # Number of text patches for each input
+print(encoding.pixel_values.shape)  # [3, 3, 24, W] — W is cropped to the longest text
+print(encoding.attention_mask.sum(dim=1))  # number of text patches for each input
 ```
 
 ### Custom Configuration
@@ -178,7 +178,7 @@ encoding = processor.render(text)
 sliced_encoding = processor.slice(encoding, start=5, end=15)
 
 print(sliced_encoding.pixel_values.shape)
-print(sliced_encoding.num_text_patches)
+print(sliced_encoding.attention_mask.sum(dim=1))
 ```
 
 ### Inserting Encodings
@@ -200,17 +200,18 @@ insert_encoding = processor.render(insert_text)
 combined = processor.insert(base_encoding, start=6, end=10, inserted=insert_encoding)
 ```
 
-### Reducing White Space
+### Compacting Trailing White Space
 
 ```python
 from pixar_render import PixarProcessor
 
 processor = PixarProcessor()
-text = "Text with    lots    of    spaces"
-encoding = processor.render(text)
+texts = ["short", "a much longer sentence"]
+encoding = processor.render(texts, padding_side="left")
 
-# Reduce consecutive white pixels to maximum of 5
-compact_encoding = processor.reduce_white_space(encoding, max_white_space=5)
+# Shift text right so at most 5 white pixels remain before the right edge;
+# leading all-white patches are masked out of attention_mask.
+compact_encoding = processor.align_text_to_right_edge(encoding, max_dist_to_edge=5)
 
 # Display the image
 processor.convert_to_pil(compact_encoding)[0]
@@ -226,15 +227,19 @@ processor = PixarProcessor(
     font_size=10,
     dpi=200,
     pixels_per_patch=28,
-    max_seq_length=1024
+    max_seq_length=1024,
+    fallback_fonts_dir="./my_fonts",   # optional, see note below
 )
 
 # Save configuration
-processor.save_conf("./config")
+processor.save("./config")
 # Creates: ./config/pixar_processor_conf.json
+# If fallback_fonts_dir is set, all fallback fonts AND the primary font are
+# copied into ./config/fonts, so the folder is fully self-contained and
+# reproduces identical rendering on any machine.
 
-# Later, load the same configuration
-loaded_processor = PixarProcessor.load_conf("./config")
+# Later (or on another machine), restore the same processor
+loaded_processor = PixarProcessor.load("./config")
 ```
 
 ### Using with PyTorch Models
@@ -249,36 +254,59 @@ processor = PixarProcessor()
 texts = ["Training sample 1", "Training sample 2"]
 encoding = processor.render(texts)
 
-# Normalisation and device placement are left to you (do them on the GPU).
-# pixel_values: uint8 [batch_size, 3, height, width]
-# attention_mask: [batch_size, seq_length]
-pixel_values = encoding.pixel_values.to('cuda:0').float() / 255
+# render() does rendering + batch assembly ONLY. All numeric transforms are
+# device-agnostic tools — move the batch to the GPU first, then apply them
+# there (uint8 transfers 4x less data than float32, and the math is free on GPU):
+pixel_values = encoding.pixel_values.to('cuda:0', non_blocking=True)
+pixel_values = PixarProcessor.normalize(pixel_values)          # float32 [0, 1]
+# pixel_values = PixarProcessor.binarize(pixel_values)         # optional: pure black/white
 output = your_vision_model(
     pixel_values=pixel_values,
     attention_mask=encoding.attention_mask.to('cuda:0'),
 )
 ```
 
-> **Note (v0.2.0, breaking change):** `render()` returns raw `uint8` pixel values in
-> `[0, 255]` on the CPU. It no longer normalises to float `[0, 1]` or moves tensors to a
-> device — do that in your training framework so it can run on the target GPU and inside
-> `DataLoader` worker processes. To reproduce the old output: `encoding.pixel_values.float() / 255`.
-> The `device` constructor argument is deprecated and ignored.
+> **Note (v0.2.0+, breaking changes):** `render()` returns raw `uint8` pixel values in
+> `[0, 255]` on the CPU. It does not normalise, binarize, repeat channels or move
+> tensors to a device — use the GPU-side tools `normalize` / `binarize` /
+> `expand_channels` instead. To reproduce the pre-0.2.0 output:
+> `encoding.pixel_values.float() / 255`. The `device` constructor argument is
+> deprecated and ignored. **Since v0.4.0**, grayscale processors (`rgb=False`)
+> return `[batch, 1, height, width]` — call `expand_channels()` on the GPU if your
+> model expects 3 channels (it is a zero-copy view).
 
-### Binary Mode
+### Binary (Black/White) Pixels
 
 ```python
 from pixar_render import PixarProcessor
 
-# Render in binary mode (black and white only)
-processor = PixarProcessor(binary=True)
+processor = PixarProcessor()
+encoding = processor.render("Binary rendered text")
 
-text = "Binary rendered text"
-encoding = processor.render(text)
+# Threshold to pure black/white with the device-agnostic tool (run it on the
+# GPU in training code). uint8 in -> uint8 {0, 255} out; float in -> {0., 1.} out.
+bw = PixarProcessor.binarize(encoding.pixel_values)
 
-# Pixel values will be 0 or 255 (uint8); divide by 255 for {0, 1}
-images = processor.convert_to_pil(encoding)
+images = processor.convert_to_pil(PixarProcessor.binarize(encoding))
 images[0].save("binary_output.png")
+```
+
+> `PixarProcessor(binary=True)` still works but is deprecated: it binarizes inside
+> `render()` on the CPU. Prefer calling `binarize()` after moving the batch to the GPU.
+
+### Grayscale Mode
+
+```python
+from pixar_render import PixarProcessor
+
+processor = PixarProcessor(rgb=False)          # faster rendering, 1/3 the data
+encoding = processor.render("Grayscale text")
+print(encoding.pixel_values.shape)             # [1, 1, height, width] (v0.4.0)
+
+# If the model expects 3 channels, expand on the GPU — it's a zero-copy view:
+pv = encoding.pixel_values.to('cuda:0')
+pv = PixarProcessor.expand_channels(pv)        # [1, 3, height, width] view
+pv = PixarProcessor.normalize(pv)
 ```
 
 ## API Reference
@@ -286,12 +314,10 @@ images[0].save("binary_output.png")
 ### PixarProcessor
 
 **`__init__`** parameters:
-- `font_file` (str): Font file name (default: 'GoNotoCurrent.ttf')
-- `font_size` (int): Font size in points (default: 8)
-- `font_color` (str): Text color (default: "black")
-- `background_color` (str): Background color (default: "white")
-- `binary` (bool): Binarize output (default: False)
-- `rgb` (bool): Use RGB mode (default: True)
+- `font_file` (str): Primary font, a path or bare file name. A bare name is looked up in `fallback_fonts_dir` first, then in the package's `resources/fonts` (default: 'GoNotoCurrent.ttf')
+- `font_size` (int): Font size in points; pixel em-size is `dpi / 72 * font_size` (default: 8)
+- `binary` (bool): Deprecated — binarizes inside `render()` on the CPU. Prefer the `binarize()` tool on the GPU (default: False)
+- `rgb` (bool): True renders RGB `[B, 3, H, W]`; False renders grayscale `[B, 1, H, W]` — use `expand_channels()` for 3-channel models (default: True)
 - `dpi` (int): Dots per inch (default: 180)
 - `pad_size` (int): Padding size (default: 3)
 - `pixels_per_patch` (int): Pixels per patch (default: 24)
@@ -305,31 +331,43 @@ images[0].save("binary_output.png")
 - `contour_width` (int): Contour line width (default: 1)
 - `device` (str | int): Deprecated and ignored (default: 'cpu'). render() returns CPU uint8; move tensors yourself.
 
-**Methods:**
-- `render(text)`: Render text to PixarEncoding
+**Rendering:**
+- `render(text, padding_side, truncate, add_eos)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`)
+
+**GPU-side tools** (static, device-agnostic — run them after moving the batch to the GPU; accept a tensor or a PixarEncoding):
+- `normalize(pixels)`: uint8 [0, 255] -> float32 [0, 1]
+- `binarize(pixels, threshold=0.5)`: threshold to pure black/white
+- `expand_channels(pixels, num_channels=3)`: grayscale [B, 1, H, W] -> [B, 3, H, W] zero-copy view
+
+**Visualisation:**
 - `convert_to_pil(encoding, square, contour)`: Convert to PIL Images
 - `save_as_images(encoding, dir_path, square, contour)`: Save images to directory
+
+**Patch-level editing:**
 - `slice(encoding, start, end)`: Extract patch range
 - `insert(encoding, start, end, inserted)`: Insert encoding into another
-- `reduce_white_space(encoding, max_white_space)`: Reduce white space
-- `save_conf(dir_path)`: Save configuration to JSON
-- `load_conf(dir_path)`: Load configuration from JSON (classmethod)
+- `append(encoding, inserted)`: Concatenate two encodings
+- `align_text_to_right_edge(encoding, max_dist_to_edge)`: Compact trailing white space (in-place variant: `align_text_to_right_edge_`)
+
+**Persistence:**
+- `save(dir_path)`: Save configuration to JSON; bundles primary + fallback fonts when `fallback_fonts_dir` is set
+- `load(dir_path)`: Restore a processor from a saved directory (classmethod)
 
 ### PixarEncoding
 
 Dataclass containing:
-- `pixel_values` (torch.Tensor): Rendered pixel values, uint8 in [0, 255] on CPU, [batch, channels, height, width]
+- `pixel_values` (torch.Tensor): Rendered pixel values, uint8 in [0, 255] on CPU, [batch, channels, height, width] (channels: 3 RGB / 1 grayscale)
 - `attention_mask` (torch.Tensor): Attention mask [batch, seq_length]
-- `num_text_patches` (List[int]): Number of text patches per sample
-- `sep_patches` (List[List[int]]): Separator patch positions per sample
+- `sep_patches` (List[List[int]]): Separator (EOS) patch indices per sample
 
 **Methods:**
 - `to(device)`: Move tensors to device
 - `clone()`: Create a deep copy
+- `enc[i]` / `enc[a:b]`: Select a sub-batch (keeps the batch dimension)
 
 ## Requirements
 
-- Python = 3.11
+- Python >= 3.11
 - numpy
 - torch
 - torchvision
