@@ -270,10 +270,11 @@ output = your_vision_model(
 > `[0, 255]` on the CPU. It does not normalise, binarize, repeat channels or move
 > tensors to a device — use the GPU-side tools `normalize` / `binarize` /
 > `expand_channels` instead. To reproduce the pre-0.2.0 output:
-> `encoding.pixel_values.float() / 255`. The `device` constructor argument is
-> deprecated and ignored. **Since v0.4.0**, grayscale processors (`rgb=False`)
-> return `[batch, 1, height, width]` — call `expand_channels()` on the GPU if your
-> model expects 3 channels (it is a zero-copy view).
+> `encoding.pixel_values.float() / 255`. **Since v0.4.0**, grayscale processors
+> (`rgb=False`) return `[batch, 1, height, width]` — call `expand_channels()` on the
+> GPU if your model expects 3 channels (it is a zero-copy view) — and the unused
+> `device` / `pad_size` constructor arguments are removed (configs saved by older
+> versions still load; stale keys are ignored with a warning).
 
 ### Binary (Black/White) Pixels
 
@@ -319,7 +320,6 @@ pv = PixarProcessor.normalize(pv)
 - `binary` (bool): Deprecated — binarizes inside `render()` on the CPU. Prefer the `binarize()` tool on the GPU (default: False)
 - `rgb` (bool): True renders RGB `[B, 3, H, W]`; False renders grayscale `[B, 1, H, W]` — use `expand_channels()` for 3-channel models (default: True)
 - `dpi` (int): Dots per inch (default: 180)
-- `pad_size` (int): Padding size (default: 3)
 - `pixels_per_patch` (int): Pixels per patch (default: 24)
 - `max_seq_length` (int): Maximum sequence length (default: 529)
 - `fallback_fonts_dir` (str | None): Directory for fallback fonts
@@ -329,7 +329,6 @@ pv = PixarProcessor.normalize(pv)
 - `contour_b` (float): Blue component of contour (default: 0.0)
 - `contour_alpha` (float): Contour transparency (default: 0.7)
 - `contour_width` (int): Contour line width (default: 1)
-- `device` (str | int): Deprecated and ignored (default: 'cpu'). render() returns CPU uint8; move tensors yourself.
 
 **Rendering:**
 - `render(text, padding_side, truncate, add_eos)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`)

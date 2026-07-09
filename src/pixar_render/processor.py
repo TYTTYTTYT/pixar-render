@@ -230,7 +230,6 @@ class PixarProcessor:
         binary: bool = False,
         rgb: bool = True,
         dpi: int = 180,
-        pad_size: int = 3,
         pixels_per_patch: int = 24,
         max_seq_length: int = 529,
         add_eos: bool = True,
@@ -243,7 +242,6 @@ class PixarProcessor:
         contour_b: float = 0.0,
         contour_alpha: float = 0.7,
         contour_width: int = 1,
-        device: Union[str, int] = 'cpu'
     ):
         """Create a text-to-pixels processor.
 
@@ -261,7 +259,6 @@ class PixarProcessor:
                 ``expand_channels()`` if your model wants 3 channels (it is a
                 zero-copy view, do it on the GPU).
             dpi: Dots per inch; scales the font (em px = dpi / 72 * font_size).
-            pad_size: Reserved; padding around the rendered text (currently unused).
             pixels_per_patch: Height of the rendered strip and side length of one
                 square patch, in pixels.
             max_seq_length: Maximum number of patches per sequence (the rendering
@@ -280,16 +277,12 @@ class PixarProcessor:
                 ``convert_to_pil(..., contour=True)``.
             contour_alpha: Contour opacity for visualisation.
             contour_width: Contour line width in pixels.
-            device: Deprecated and ignored. ``render()`` always returns CPU
-                tensors; move them yourself (``enc.to(device)``) or in the
-                training framework.
         """
         self.font_file = font_file
         self.font_size = font_size
         self.rgb = rgb
         self.binary = binary
         self.dpi = dpi
-        self.pad_size = pad_size
         self.pixels_per_patch = pixels_per_patch
         self.max_seq_length = max_seq_length
         self.add_eos = add_eos
@@ -302,7 +295,6 @@ class PixarProcessor:
         self.contour_b = contour_b
         self.contour_alpha = contour_alpha
         self.contour_width = contour_width
-        self.device = device
 
         if binary:
             warnings.warn(
@@ -317,15 +309,14 @@ class PixarProcessor:
             f"max_seq_length must be divisible by patch_len, but got {max_seq_length} and {patch_len}"
 
         self.renderer = PangoCairoTextRenderer(
-            font_file,
-            font_size,
-            rgb,
-            dpi,
-            pad_size,
-            pixels_per_patch,
-            max_seq_length,
-            fallback_fonts_dir,
-            patch_len
+            font_file=font_file,
+            font_size=font_size,
+            rgb=rgb,
+            dpi=dpi,
+            pixels_per_patch=pixels_per_patch,
+            max_seq_length=max_seq_length,
+            fallback_fonts_dir=fallback_fonts_dir,
+            patch_len=patch_len,
         )
 
         self._to_pil = ToPILImage(mode="RGB")
@@ -704,7 +695,6 @@ class PixarProcessor:
             "binary": self.binary,
             "rgb": self.rgb,
             "dpi": self.dpi,
-            "pad_size": self.pad_size,
             "pixels_per_patch": self.pixels_per_patch,
             "max_seq_length": self.max_seq_length,
             "add_eos": self.add_eos,
@@ -717,7 +707,6 @@ class PixarProcessor:
             "contour_b": self.contour_b,
             "contour_alpha": self.contour_alpha,
             "contour_width": self.contour_width,
-            "device": self.device,
         }
 
     def save(self, dir_path: str) -> None:
@@ -785,6 +774,17 @@ class PixarProcessor:
         fallback = config.get("fallback_fonts_dir")
         if fallback is not None and not Path(fallback).is_absolute():
             config["fallback_fonts_dir"] = str((src / fallback).resolve())
+
+        # Drop keys that this version's constructor no longer accepts (e.g. the
+        # removed `device` / `pad_size`), so configs saved by older versions load.
+        known = set(inspect.signature(cls.__init__).parameters) - {"self"}
+        stale = set(config) - known
+        if stale:
+            warnings.warn(
+                f"Ignoring config keys no longer supported by {cls.__name__}: {sorted(stale)}",
+                stacklevel=2,
+            )
+            config = {k: v for k, v in config.items() if k in known}
 
         return cls(**config)
 
