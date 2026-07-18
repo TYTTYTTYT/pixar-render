@@ -13,6 +13,9 @@ A Python library for rendering text into visual representations as pixel tensors
 - Configuration save/load functionality
 - Text encoding slicing and insertion operations
 - White space reduction for compact representations
+- Packed training windows: several documents rendered into ONE window with
+  EOS separators and exact segment boundaries (`content_sized=True`)
+- Single-channel fast path for greyscale consumers (`render(..., channels=1)`)
 
 ## Installation
 
@@ -68,6 +71,29 @@ encoding = processor.render(texts)
 
 print(encoding.pixel_values.shape)  # [3, 3, 24, W] — W is cropped to the longest text
 print(encoding.attention_mask.sum(dim=1))  # number of text patches for each input
+```
+
+### Packed Training Windows
+
+For LM pretraining, several documents can be packed into a single fixed-width
+window instead of one document per sequence. Pass a tuple of texts with
+`content_sized=True`: the documents are drawn onto one surface separated by EOS
+patches, overflow is clipped at the window edge, and `sep_patches` reports the
+exact separator offsets — divide by `pixels_per_patch` for per-document block
+boundaries (segment ids, attention masks, position ids).
+
+```python
+from pixar_render import PixarProcessor
+
+processor = PixarProcessor(pixels_per_patch=16, max_seq_length=180)
+processor.renderer.content_sized = True
+
+enc = processor.render(
+    [("First document.", "Second document.", "Third one.")],
+    truncate=True, add_eos=True, padding_side="right",
+    channels=1,                      # [B, 1, H, W] uint8, one copy per item
+)
+boundaries = [s // processor.renderer.pixels_per_patch for s in enc.sep_patches[0]]
 ```
 
 ### Custom Configuration
@@ -324,6 +350,7 @@ pv = PixarProcessor.normalize(pv)
 - `max_seq_length` (int): Maximum sequence length (default: 529)
 - `fallback_fonts_dir` (str | None): Directory for fallback fonts
 - `patch_len` (int): Patch length (default: 1)
+- `content_sized` (bool): True renders onto a surface sized to the content instead of the full canvas: a `str` renders at its own width, and a tuple renders as ONE packed window (see [Packed Training Windows](#packed-training-windows)). Pixels are unchanged; only the canvas is (default: False)
 - `contour_r` (float): Red component of contour (default: 0.0)
 - `contour_g` (float): Green component of contour (default: 0.0)
 - `contour_b` (float): Blue component of contour (default: 0.0)
@@ -331,7 +358,7 @@ pv = PixarProcessor.normalize(pv)
 - `contour_width` (int): Contour line width (default: 1)
 
 **Rendering:**
-- `render(text, padding_side, truncate, add_eos)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`)
+- `render(text, padding_side, truncate, add_eos, channels)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`). `channels=1` takes a fast path that writes one strided copy per item straight into a preallocated `[B, 1, H, W]` batch — bit-identical to the default output's first channel, for callers that only need greyscale
 
 **GPU-side tools** (static, device-agnostic — run them after moving the batch to the GPU; accept a tensor or a PixarEncoding):
 - `normalize(pixels)`: uint8 [0, 255] -> float32 [0, 1]
@@ -357,7 +384,7 @@ pv = PixarProcessor.normalize(pv)
 Dataclass containing:
 - `pixel_values` (torch.Tensor): Rendered pixel values, uint8 in [0, 255] on CPU, [batch, channels, height, width] (channels: 3 RGB / 1 grayscale)
 - `attention_mask` (torch.Tensor): Attention mask [batch, seq_length]
-- `sep_patches` (List[List[int]]): Separator (EOS) patch indices per sample
+- `sep_patches` (List[List[int]]): Separator (EOS) patch pixel offsets per sample — in a packed window these are the exact per-document boundaries (divide by `pixels_per_patch` for block indices)
 
 **Methods:**
 - `to(device)`: Move tensors to device
