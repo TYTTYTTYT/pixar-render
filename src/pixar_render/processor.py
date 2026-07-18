@@ -434,17 +434,19 @@ class PixarProcessor:
         text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]],
         padding_side: Literal['left', 'right'] | None = None,
         truncate: bool | None = None,
-        add_eos: bool | None = None
+        add_eos: bool | None = None,
+        channels: int | None = None,
     ) -> PixarEncoding:
         """Alias for :meth:`render` — ``processor(texts)`` == ``processor.render(texts)``."""
-        return self.render(text, padding_side, truncate, add_eos)
+        return self.render(text, padding_side, truncate, add_eos, channels)
 
     def render(
         self,
         text: Union[str, Tuple[str, ...], List[Union[str, Tuple[str, ...]]]],
         padding_side: Literal['left', 'right'] | None = None,
         truncate: bool | None = None,
-        add_eos: bool | None = None
+        add_eos: bool | None = None,
+        channels: int | None = None,
     ) -> PixarEncoding:
         """Render text into a raw ``uint8`` pixel batch (CPU-only, no post-processing).
 
@@ -514,7 +516,18 @@ class PixarProcessor:
         # Pixels stay raw uint8 [0, 255] on the CPU: normalisation, channel
         # expansion, binarization and device placement belong to the caller (they
         # are cheap on the GPU, expensive here).
-        if self.rgb:
+        if channels == 1:
+            # Fast path for single-channel consumers (rendered text is
+            # greyscale — all 3 channels are identical): ONE strided copy per
+            # item straight into a preallocated [B, 1, H, W] batch. The default
+            # path costs three full-canvas copies (per-item contiguous, stack,
+            # transpose) x 3 channels — profiled at ~60% of total render time.
+            H = rendered[0].pixel_values.shape[0]
+            batch = np.empty((len(rendered), 1, H, conv_width), dtype=np.uint8)
+            for i, p in enumerate(rendered):
+                src = p.pixel_values
+                batch[i, 0] = src[:, :conv_width, 0] if src.ndim == 3 else src[:, :conv_width]
+        elif self.rgb:
             batch = np.stack(
                 [np.ascontiguousarray(p.pixel_values[:, :conv_width, :]) for p in rendered]
             )

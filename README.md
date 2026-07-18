@@ -13,6 +13,9 @@ A Python library for rendering text into visual representations as pixel tensors
 - Configuration save/load functionality
 - Text encoding slicing and insertion operations
 - White space reduction for compact representations
+- Packed training windows: several documents rendered into ONE window with
+  EOS separators and exact segment boundaries (`content_sized=True`)
+- Single-channel fast path for greyscale consumers (`render(..., channels=1)`)
 
 ## Installation
 
@@ -68,6 +71,29 @@ encoding = processor.render(texts)
 
 print(encoding.pixel_values.shape)  # [3, 3, 24, W] — W is cropped to the longest text
 print(encoding.attention_mask.sum(dim=1))  # number of text patches for each input
+```
+
+### Packed Training Windows
+
+For LM pretraining, several documents can be packed into a single fixed-width
+window instead of one document per sequence. Pass a tuple of texts with
+`content_sized=True`: the documents are drawn onto one surface separated by EOS
+patches, overflow is clipped at the window edge, and `sep_patches` reports the
+exact separator offsets — divide by `pixels_per_patch` for per-document block
+boundaries (segment ids, attention masks, position ids).
+
+```python
+from pixar_render import PixarProcessor
+
+processor = PixarProcessor(pixels_per_patch=16, max_seq_length=180)
+processor.renderer.content_sized = True
+
+enc = processor.render(
+    [("First document.", "Second document.", "Third one.")],
+    truncate=True, add_eos=True, padding_side="right",
+    channels=1,                      # [B, 1, H, W] uint8, one copy per item
+)
+boundaries = [s // processor.renderer.pixels_per_patch for s in enc.sep_patches[0]]
 ```
 
 ### Custom Configuration

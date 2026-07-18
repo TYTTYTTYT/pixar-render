@@ -157,6 +157,7 @@ class PangoCairoTextRenderer():
         max_seq_length: int = 529,
         fallback_fonts_dir: Optional[str] = None,
         patch_len: int = 1,
+        content_sized: bool = False,
     ):
         super().__init__()
 
@@ -183,6 +184,11 @@ class PangoCairoTextRenderer():
         self.PANGO_SCALE = 1024
         self.eos = True
         self.patch_len = patch_len
+        # content-sized rendering: a str renders onto a surface sized to its
+        # own content, and a tuple renders as ONE packed training window
+        # (see _render_text_fast / _render_packed_window). Off by default —
+        # the canvas-sized paths keep their exact previous behaviour.
+        self.content_sized = content_sized
 
     @property
     def max_pixels_len(self):
@@ -1376,6 +1382,113 @@ class PangoCairoTextRenderer():
             **kwargs,
         )
 
+    def _render_packed_window(self, texts, **kwargs) -> Encoding:
+        """Render several documents into ONE window-wide A8 surface, separated
+        by EOS patches — a packed training window in a single render call.
+
+        Per-document fixed costs (surface, extraction, python glue) are paid
+        once per WINDOW instead of once per document. Documents that do not
+        fit are clipped at the window edge (mgpt2 drop-overflow semantics; a
+        clipped document gets no trailing EOS). ``sep_patches`` carries the
+        EXACT separator pixel offsets, so callers derive precise per-document
+        segment boundaries regardless of how approximate their doc-selection
+        estimate was. Enabled through the tuple-input path when
+        ``content_sized`` is set.
+        """
+        W = self.max_pixels_len
+        pp = self.pixels_per_patch
+        surface = cairo.ImageSurface(cairo.FORMAT_A8, W, pp)
+        ctx = cairo.Context(surface)
+        shift = 1 if pp < 10 else 2
+        eos_px = pp * self.patch_len
+
+        offset = 0
+        sep_patches: List[int] = []
+        used_px = 0
+        for text in texts:
+            if offset + 4 + eos_px >= W:
+                break
+            offset += 2
+            layout = PangoCairo.create_layout(ctx)
+            layout.set_font_description(self.font)
+            layout.set_text(str(text).replace("\n", " "), -1)
+            width, height = layout.get_pixel_size()
+            ctx.move_to(offset, pp / 2.0 - height / 2.0 - shift)
+            PangoCairo.show_layout(ctx, layout)              # cairo clips at W
+            end = offset + width + 2
+            if end + eos_px > W:                             # clipped doc: no EOS
+                used_px = W
+                break
+            eos_patch_offset = self._get_offset_to_next_patch(end)
+            sep_patches += self.get_eos_list(eos_patch_offset)
+            offset = sep_patches[-1] + pp
+            used_px = offset
+        surface.flush()
+
+        stride = surface.get_stride()
+        data = np.frombuffer(surface.get_data(), dtype=np.uint8)
+        data = data.reshape(pp, stride)[:, :W]
+        image = np.invert(data)
+        image[:, used_px:] = 255                             # white beyond content
+        seps = sep_patches if self.eos else []
+        for sp in seps:
+            image[:, sp: sp + pp] = 0
+        return Encoding(
+            pixel_values=image,
+            sep_patches=seps,
+            num_text_patches=max(self.px2patch_ceil(used_px) - 1, 0),
+        )
+
+    def _render_text_fast(self, text: str, **kwargs) -> Encoding:
+        """Content-width A8 single-text render: ONE shaping pass and a surface
+        sized to the content instead of ``max_pixels_len``. The default path
+        pays four full-canvas-width operations per document (surface alloc,
+        background, extraction invert, batch copy) even though average content
+        covers ~25% of the canvas. Pixels are bit-identical to the default
+        path over the produced width; trailing white padding is the caller's
+        job (the processor's ``channels=1`` batch assembly prefills 255).
+        Enabled via ``renderer.content_sized = True`` (single-str inputs only).
+        """
+        text = text.replace("\n", " ")
+        scratch = getattr(self, "_scratch_ctx", None)
+        if scratch is None:
+            s = cairo.ImageSurface(cairo.FORMAT_A8, 8, self.pixels_per_patch)
+            self._scratch_surface = s
+            scratch = self._scratch_ctx = cairo.Context(s)
+        pctx = PangoCairo.create_context(scratch)
+        pctx.set_font_description(self.font)
+        layout = Pango.Layout(pctx)
+        layout.set_text(text, -1)
+        width, height = layout.get_pixel_size()
+
+        offset = 2
+        eos_patch_offset = self._get_offset_to_next_patch(2 + width + 2)
+        offset_list = self.get_eos_list(eos_patch_offset)
+        num_text_patches = self.px2patch_floor(offset_list[0])
+        eos_end = offset_list[-1] + self.pixels_per_patch
+        W = min(self.max_pixels_len, eos_end)
+
+        surface = cairo.ImageSurface(cairo.FORMAT_A8, W, self.pixels_per_patch)
+        ctx = cairo.Context(surface)
+        PangoCairo.update_layout(ctx, layout)
+        shift = 1 if self.pixels_per_patch < 10 else 2
+        ctx.move_to(offset, self.pixels_per_patch / 2.0 - height / 2.0 - shift)
+        PangoCairo.show_layout(ctx, layout)
+        surface.flush()
+
+        stride = surface.get_stride()
+        data = np.frombuffer(surface.get_data(), dtype=np.uint8)
+        data = data.reshape(self.pixels_per_patch, stride)[:, :W]
+        image = np.invert(data)
+        sep_patches = offset_list if self.eos else []
+        for sp in sep_patches:
+            image[:, sp: sp + self.pixels_per_patch] = 0
+        return Encoding(
+            pixel_values=image,
+            sep_patches=sep_patches,
+            num_text_patches=num_text_patches,
+        )
+
     def _render_text_to_surface(
         self,
         text: str,
@@ -1500,12 +1613,17 @@ class PangoCairoTextRenderer():
         if isinstance(text, list):
             rendering_fn = self._render_words_to_surface
         elif isinstance(text, tuple):
-            if len(text) <= 2:
+            if self.content_sized:
+                rendering_fn = self._render_packed_window
+            elif len(text) <= 2:
                 rendering_fn = self._render_text_pair_to_surface
             else:
                 rendering_fn = self._render_text_list_to_surface
         elif isinstance(text, str):
-            rendering_fn = self._render_text_to_surface
+            if self.content_sized:
+                rendering_fn = self._render_text_fast
+            else:
+                rendering_fn = self._render_text_to_surface
         else:
             raise TypeError(
                 f"{self.__class__.__name__} does not support inputs of type {type(text)}. Supported types are "
