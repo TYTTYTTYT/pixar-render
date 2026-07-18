@@ -350,6 +350,7 @@ pv = PixarProcessor.normalize(pv)
 - `max_seq_length` (int): Maximum sequence length (default: 529)
 - `fallback_fonts_dir` (str | None): Directory for fallback fonts
 - `patch_len` (int): Patch length (default: 1)
+- `content_sized` (bool): True renders onto a surface sized to the content instead of the full canvas: a `str` renders at its own width, and a tuple renders as ONE packed window (see [Packed Training Windows](#packed-training-windows)). Pixels are unchanged; only the canvas is (default: False)
 - `contour_r` (float): Red component of contour (default: 0.0)
 - `contour_g` (float): Green component of contour (default: 0.0)
 - `contour_b` (float): Blue component of contour (default: 0.0)
@@ -357,7 +358,7 @@ pv = PixarProcessor.normalize(pv)
 - `contour_width` (int): Contour line width (default: 1)
 
 **Rendering:**
-- `render(text, padding_side, truncate, add_eos)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`)
+- `render(text, padding_side, truncate, add_eos, channels)`: Render text to a raw uint8 PixarEncoding (also callable as `processor(text)`). `channels=1` takes a fast path that writes one strided copy per item straight into a preallocated `[B, 1, H, W]` batch — bit-identical to the default output's first channel, for callers that only need greyscale
 
 **GPU-side tools** (static, device-agnostic — run them after moving the batch to the GPU; accept a tensor or a PixarEncoding):
 - `normalize(pixels)`: uint8 [0, 255] -> float32 [0, 1]
@@ -383,7 +384,7 @@ pv = PixarProcessor.normalize(pv)
 Dataclass containing:
 - `pixel_values` (torch.Tensor): Rendered pixel values, uint8 in [0, 255] on CPU, [batch, channels, height, width] (channels: 3 RGB / 1 grayscale)
 - `attention_mask` (torch.Tensor): Attention mask [batch, seq_length]
-- `sep_patches` (List[List[int]]): Separator (EOS) patch indices per sample
+- `sep_patches` (List[List[int]]): Separator (EOS) patch pixel offsets per sample — in a packed window these are the exact per-document boundaries (divide by `pixels_per_patch` for block indices)
 
 **Methods:**
 - `to(device)`: Move tensors to device
