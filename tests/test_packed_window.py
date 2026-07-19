@@ -131,6 +131,51 @@ def test_content_sized_off_by_default():
     print('PASS 7: content_sized defaults off')
 
 
+def test_attention_mask_spans_the_returned_pixels():
+    """The mask has to describe the image that is actually returned.
+
+    With truncate=False the canvas keeps its full width while the mask was
+    sized to the longest text, so callers indexing blocks against the mask hit
+    a shape mismatch — or lined up against the wrong blocks. Nothing in this
+    suite asserted on attention_mask at all before.
+    """
+    for rgb in (False, True):
+        p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64,
+                           patch_len=1, rgb=rgb)
+        p.binary = False
+        bw = p._block_width
+        texts = ['short', 'a considerably longer line of text goes here']
+        for truncate in (True, False):
+            for side in ('right', 'left'):
+                enc = p.render(texts, truncate=truncate, add_eos=True,
+                               padding_side=side)
+                blocks = enc.pixel_values.shape[-1] // bw
+                assert enc.attention_mask.shape[-1] == blocks, (
+                    f'rgb={rgb} truncate={truncate} side={side}: '
+                    f'{blocks} pixel blocks vs {enc.attention_mask.shape[-1]} mask cols')
+                assert enc.attention_mask.shape[0] == len(texts)
+    print('PASS 8: attention_mask spans the returned pixels in every mode')
+
+
+def test_mask_marks_the_blocks_that_hold_text():
+    """A marked block must actually contain ink, and an unmarked one must not."""
+    p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64, patch_len=1)
+    p.binary = False
+    p.rgb = False
+    p.renderer.rgb = False
+    bw = p._block_width
+    enc = p.render(['hello world'], truncate=False, add_eos=True, padding_side='right')
+    img = np.asarray(enc.pixel_values[0, 0])
+    mask = enc.attention_mask[0]
+    marked = [b for b in range(mask.shape[0]) if mask[b] == 1]
+    blank = [b for b in range(mask.shape[0])
+             if mask[b] == 0 and (img[:, b * bw:(b + 1) * bw] == 255).all()]
+    assert marked, 'nothing marked'
+    assert len(blank) == int((mask == 0).sum()), \
+        'a block outside the mask still carried ink'
+    print(f'PASS 9: {len(marked)} marked blocks, all {len(blank)} unmarked blocks blank')
+
+
 if __name__ == '__main__':
     test_channels1_matches_default()
     test_channels_default_unchanged()
@@ -139,4 +184,6 @@ if __name__ == '__main__':
     test_packed_window_boundaries_are_exact()
     test_packed_window_clips_overflow()
     test_content_sized_off_by_default()
+    test_attention_mask_spans_the_returned_pixels()
+    test_mask_marks_the_blocks_that_hold_text()
     print('ALL PASS')

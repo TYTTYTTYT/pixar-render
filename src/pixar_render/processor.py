@@ -589,8 +589,15 @@ class PixarProcessor:
             if padding_side != 'right':
                 raise ValueError(f"padding_side must be 'left' or 'right', but got {padding_side}")
 
+        # The mask must span the pixels that are actually returned. With
+        # truncate=True those coincide, but with truncate=False the canvas
+        # keeps its full width while max_num_patches describes only the
+        # longest text — the caller then received a mask narrower than the
+        # image and any per-block indexing against it fails or, worse, lines
+        # up against the wrong blocks.
+        mask_patches = pixel_values.shape[-1] // self._block_width
         attention_mask = create_attention_mask(
-            dims=(pixel_values.shape[0], max_num_patches),
+            dims=(pixel_values.shape[0], mask_patches),
             seq_lens=num_text_patches,
             padding_side=padding_side   # type: ignore
         )
