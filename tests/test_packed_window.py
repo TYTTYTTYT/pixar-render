@@ -131,6 +131,119 @@ def test_content_sized_off_by_default():
     print('PASS 7: content_sized defaults off')
 
 
+def test_attention_mask_spans_the_returned_pixels():
+    """The mask has to describe the image that is actually returned.
+
+    With truncate=False the canvas keeps its full width while the mask was
+    sized to the longest text, so callers indexing blocks against the mask hit
+    a shape mismatch — or lined up against the wrong blocks. Nothing in this
+    suite asserted on attention_mask at all before.
+    """
+    for rgb in (False, True):
+        p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64,
+                           patch_len=1, rgb=rgb)
+        p.binary = False
+        bw = p._block_width
+        texts = ['short', 'a considerably longer line of text goes here']
+        for truncate in (True, False):
+            for side in ('right', 'left'):
+                enc = p.render(texts, truncate=truncate, add_eos=True,
+                               padding_side=side)
+                blocks = enc.pixel_values.shape[-1] // bw
+                assert enc.attention_mask.shape[-1] == blocks, (
+                    f'rgb={rgb} truncate={truncate} side={side}: '
+                    f'{blocks} pixel blocks vs {enc.attention_mask.shape[-1]} mask cols')
+                assert enc.attention_mask.shape[0] == len(texts)
+    print('PASS 8: attention_mask spans the returned pixels in every mode')
+
+
+def test_mask_marks_the_blocks_that_hold_text():
+    """A marked block must actually contain ink, and an unmarked one must not."""
+    p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64, patch_len=1)
+    p.binary = False
+    p.rgb = False
+    p.renderer.rgb = False
+    bw = p._block_width
+    enc = p.render(['hello world'], truncate=False, add_eos=True, padding_side='right')
+    img = np.asarray(enc.pixel_values[0, 0])
+    mask = enc.attention_mask[0]
+    marked = [b for b in range(mask.shape[0]) if mask[b] == 1]
+    blank = [b for b in range(mask.shape[0])
+             if mask[b] == 0 and (img[:, b * bw:(b + 1) * bw] == 255).all()]
+    assert marked, 'nothing marked'
+    assert len(blank) == int((mask == 0).sum()), \
+        'a block outside the mask still carried ink'
+    print(f'PASS 9: {len(marked)} marked blocks, all {len(blank)} unmarked blocks blank')
+
+
+def test_mask_marks_text_for_every_padding_side():
+    """PASS 9 only ever checked padding_side='right', which was the axis that
+    already worked. With left padding the width fix was not enough: the shift
+    right-aligned against max_num_patches while the mask was built over the
+    canvas width. With truncate=False those differ, so a single text took the
+    `n == max_num_patches` shortcut and never moved while the mask marked the
+    far right — every marked block blank, every text block masked out.
+    """
+    p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64, patch_len=1)
+    p.binary = False
+    p.rgb = False
+    p.renderer.rgb = False
+    bw = p._block_width
+    texts = ['hi', 'a much longer sentence here', 'mid length']
+    for side in ('right', 'left'):
+        for truncate in (True, False):
+            enc = p.render(texts, truncate=truncate, add_eos=True, padding_side=side)
+            for i in range(len(texts)):
+                img = np.asarray(enc.pixel_values[i, 0])
+                mask = enc.attention_mask[i]
+                nblocks = img.shape[-1] // bw
+                assert mask.shape[0] == nblocks, \
+                    f'{side}/{truncate} row {i}: mask {mask.shape[0]} vs {nblocks} blocks'
+                ink = {b for b in range(nblocks)
+                       if (img[:, b * bw:(b + 1) * bw] != 255).any()}
+                marked = {b for b in range(nblocks) if mask[b] == 1}
+                assert ink <= marked, (
+                    f'{side}/truncate={truncate} row {i}: text in blocks '
+                    f'{sorted(ink - marked)} is outside the mask')
+                for sep in enc.sep_patches[i]:
+                    assert 0 <= sep < nblocks, \
+                        f'{side}/{truncate} row {i}: separator {sep} outside {nblocks}'
+                    assert mask[sep] == 1, \
+                        f'{side}/{truncate} row {i}: separator {sep} not marked'
+    print('PASS 10: mask and separators track the text for both padding sides')
+
+
+def test_is_rtl_agrees_with_pango_base_dir():
+    """is_rtl must equal Pango's own base-direction verdict, not a char vote.
+
+    The majority vote over first/middle/last non-punct characters is not the
+    bidi rule: a Latin lead-in before Arabic body voted RTL (and the text-list
+    path then hard-raised on a document Pango lays out LTR), and guillemet- or
+    comma-led Arabic voted LTR. is_rtl now delegates to Pango.find_base_dir,
+    which is what the renderer lays out with.
+    """
+    import gi
+    gi.require_version('Pango', '1.0')
+    from gi.repository import Pango
+    from pixar_render.pangocairo_render import PangoCairoTextRenderer as R
+
+    cases = [
+        'Reuters: ' + '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 ' * 3,   # Latin lead-in, Arabic body
+        '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 the latin tail',        # Arabic lead, Latin body
+        '\u00ab\u0627\u0644\u0639\u0631\u0628\u064a\u0629\u00bb',          # guillemet-quoted Arabic
+        '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 \u0646\u0635',         # pure Arabic
+        'hello world this is english',                                            # pure Latin
+        '',                                                                        # empty
+        '123 456 !!!',                                                             # neutral only
+    ]
+    for text in cases:
+        expected = Pango.find_base_dir(text, -1) == Pango.Direction.RTL
+        assert R.is_rtl(text) == expected, (
+            f'is_rtl disagrees with Pango on {text!r}: '
+            f'{R.is_rtl(text)} vs {expected}')
+    print(f'PASS 11: is_rtl matches Pango.find_base_dir on all {len(cases)} cases')
+
+
 if __name__ == '__main__':
     test_channels1_matches_default()
     test_channels_default_unchanged()
@@ -139,4 +252,8 @@ if __name__ == '__main__':
     test_packed_window_boundaries_are_exact()
     test_packed_window_clips_overflow()
     test_content_sized_off_by_default()
+    test_attention_mask_spans_the_returned_pixels()
+    test_mask_marks_the_blocks_that_hold_text()
+    test_mask_marks_text_for_every_padding_side()
+    test_is_rtl_agrees_with_pango_base_dir()
     print('ALL PASS')
