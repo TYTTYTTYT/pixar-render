@@ -6,7 +6,6 @@ import glob
 import logging
 import math
 import os
-import string
 
 try:
     import cairo
@@ -206,29 +205,26 @@ class PangoCairoTextRenderer():
     @staticmethod
     def is_rtl(text: str) -> bool:
         """
-        Returns whether a piece of text is written in a right-to-left (RTL) script based on a majority vote of the
-        first, middle, and last characters in the text after removing whitespace, punctuation, and numbers
+        Returns whether a piece of text is written in a right-to-left (RTL) script.
+
+        This asks Pango for the base direction under the Unicode Bidirectional
+        Algorithm (UAX#9) — the FIRST strong directional character — which is
+        exactly what `pango_layout_set_text` uses to lay the text out. The
+        previous implementation took a majority vote over the first, middle and
+        last non-punctuation characters, which is not the bidi rule: a Latin
+        lead-in before Arabic body voted RTL (and the text-list path then
+        hard-raised on a document Pango lays out left-to-right), while
+        guillemet- or comma-led Arabic voted LTR. Since the renderer's own
+        direction handling is Pango's, the predicate must agree with Pango, not
+        approximate it.
+
+        A run with no strong character at all (digits/punctuation only) is
+        neutral; we report that as not-RTL, matching the old empty-string case.
 
         Returns:
             Whether the piece of text is RTL, type `bool`
         """
-        text = text.translate(str.maketrans("", "", string.whitespace))
-        text = text.translate(str.maketrans("", "", string.punctuation))
-        text = text.translate(str.maketrans("", "", string.digits))
-
-        if len(text) == 0:
-            return False
-
-        vote = 0
-        for char in [text[0], text[-1], text[len(text) // 2]]:
-            if Pango.unichar_direction(char) == Pango.Direction.RTL:
-                vote += 1
-
-        is_rtl = vote >= 2
-        # if not is_rtl:
-        #    print(sys._getframe().f_back.f_code.co_name)
-        #    print(f"{text[0] = }, {text[-1] = }, {text[len(text)//2] = }")
-        return is_rtl
+        return Pango.find_base_dir(text, -1) == Pango.Direction.RTL
 
     def __getstate__(self) -> Dict[str, Any]:
         """

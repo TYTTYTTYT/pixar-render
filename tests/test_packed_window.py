@@ -213,6 +213,37 @@ def test_mask_marks_text_for_every_padding_side():
     print('PASS 10: mask and separators track the text for both padding sides')
 
 
+def test_is_rtl_agrees_with_pango_base_dir():
+    """is_rtl must equal Pango's own base-direction verdict, not a char vote.
+
+    The majority vote over first/middle/last non-punct characters is not the
+    bidi rule: a Latin lead-in before Arabic body voted RTL (and the text-list
+    path then hard-raised on a document Pango lays out LTR), and guillemet- or
+    comma-led Arabic voted LTR. is_rtl now delegates to Pango.find_base_dir,
+    which is what the renderer lays out with.
+    """
+    import gi
+    gi.require_version('Pango', '1.0')
+    from gi.repository import Pango
+    from pixar_render.pangocairo_render import PangoCairoTextRenderer as R
+
+    cases = [
+        'Reuters: ' + '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 ' * 3,   # Latin lead-in, Arabic body
+        '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 the latin tail',        # Arabic lead, Latin body
+        '\u00ab\u0627\u0644\u0639\u0631\u0628\u064a\u0629\u00bb',          # guillemet-quoted Arabic
+        '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 \u0646\u0635',         # pure Arabic
+        'hello world this is english',                                            # pure Latin
+        '',                                                                        # empty
+        '123 456 !!!',                                                             # neutral only
+    ]
+    for text in cases:
+        expected = Pango.find_base_dir(text, -1) == Pango.Direction.RTL
+        assert R.is_rtl(text) == expected, (
+            f'is_rtl disagrees with Pango on {text!r}: '
+            f'{R.is_rtl(text)} vs {expected}')
+    print(f'PASS 11: is_rtl matches Pango.find_base_dir on all {len(cases)} cases')
+
+
 if __name__ == '__main__':
     test_channels1_matches_default()
     test_channels_default_unchanged()
@@ -224,4 +255,5 @@ if __name__ == '__main__':
     test_attention_mask_spans_the_returned_pixels()
     test_mask_marks_the_blocks_that_hold_text()
     test_mask_marks_text_for_every_padding_side()
+    test_is_rtl_agrees_with_pango_base_dir()
     print('ALL PASS')
