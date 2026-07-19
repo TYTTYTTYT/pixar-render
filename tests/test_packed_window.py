@@ -176,6 +176,43 @@ def test_mask_marks_the_blocks_that_hold_text():
     print(f'PASS 9: {len(marked)} marked blocks, all {len(blank)} unmarked blocks blank')
 
 
+def test_mask_marks_text_for_every_padding_side():
+    """PASS 9 only ever checked padding_side='right', which was the axis that
+    already worked. With left padding the width fix was not enough: the shift
+    right-aligned against max_num_patches while the mask was built over the
+    canvas width. With truncate=False those differ, so a single text took the
+    `n == max_num_patches` shortcut and never moved while the mask marked the
+    far right — every marked block blank, every text block masked out.
+    """
+    p = PixarProcessor(font_size=8, pixels_per_patch=16, max_seq_length=64, patch_len=1)
+    p.binary = False
+    p.rgb = False
+    p.renderer.rgb = False
+    bw = p._block_width
+    texts = ['hi', 'a much longer sentence here', 'mid length']
+    for side in ('right', 'left'):
+        for truncate in (True, False):
+            enc = p.render(texts, truncate=truncate, add_eos=True, padding_side=side)
+            for i in range(len(texts)):
+                img = np.asarray(enc.pixel_values[i, 0])
+                mask = enc.attention_mask[i]
+                nblocks = img.shape[-1] // bw
+                assert mask.shape[0] == nblocks, \
+                    f'{side}/{truncate} row {i}: mask {mask.shape[0]} vs {nblocks} blocks'
+                ink = {b for b in range(nblocks)
+                       if (img[:, b * bw:(b + 1) * bw] != 255).any()}
+                marked = {b for b in range(nblocks) if mask[b] == 1}
+                assert ink <= marked, (
+                    f'{side}/truncate={truncate} row {i}: text in blocks '
+                    f'{sorted(ink - marked)} is outside the mask')
+                for sep in enc.sep_patches[i]:
+                    assert 0 <= sep < nblocks, \
+                        f'{side}/{truncate} row {i}: separator {sep} outside {nblocks}'
+                    assert mask[sep] == 1, \
+                        f'{side}/{truncate} row {i}: separator {sep} not marked'
+    print('PASS 10: mask and separators track the text for both padding sides')
+
+
 if __name__ == '__main__':
     test_channels1_matches_default()
     test_channels_default_unchanged()
@@ -186,4 +223,5 @@ if __name__ == '__main__':
     test_content_sized_off_by_default()
     test_attention_mask_spans_the_returned_pixels()
     test_mask_marks_the_blocks_that_hold_text()
+    test_mask_marks_text_for_every_padding_side()
     print('ALL PASS')

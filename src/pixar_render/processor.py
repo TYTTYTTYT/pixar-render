@@ -573,10 +573,17 @@ class PixarProcessor:
             pixel_width = max_num_patches * self._block_width
             pixel_values = pixel_values[:, :, :, :pixel_width]
 
-        # change padding_side if needed
+        # Right-align against the width actually RETURNED, which is the same
+        # width the mask is built over below. These were two different
+        # quantities: the shift targeted max_num_patches while the mask
+        # targeted the canvas width. With truncate=False the canvas is wider
+        # than the longest text, so a single text (n == max_num_patches) took
+        # the `continue` and never moved, while the mask marked blocks at the
+        # far right — every marked block blank, every text block masked out.
+        padded_patches = pixel_values.shape[-1] // self._block_width
         if padding_side == 'left':
             for idx, n in enumerate(num_text_patches):
-                if n == max_num_patches:
+                if n == padded_patches:
                     continue
                 text_pixel_width = n * self._block_width
                 tmp = torch.empty_like(pixel_values[idx])
@@ -584,7 +591,7 @@ class PixarProcessor:
                 tmp[:, :, :-text_pixel_width] = pixel_values[idx, :, :, text_pixel_width:]
                 pixel_values[idx] = tmp
                 for i in range(len(sep_patches[idx])):
-                    sep_patches[idx][i] = sep_patches[idx][i] + max_num_patches - n
+                    sep_patches[idx][i] = sep_patches[idx][i] + padded_patches - n
         else:
             if padding_side != 'right':
                 raise ValueError(f"padding_side must be 'left' or 'right', but got {padding_side}")
@@ -595,9 +602,8 @@ class PixarProcessor:
         # longest text — the caller then received a mask narrower than the
         # image and any per-block indexing against it fails or, worse, lines
         # up against the wrong blocks.
-        mask_patches = pixel_values.shape[-1] // self._block_width
         attention_mask = create_attention_mask(
-            dims=(pixel_values.shape[0], mask_patches),
+            dims=(pixel_values.shape[0], padded_patches),
             seq_lens=num_text_patches,
             padding_side=padding_side   # type: ignore
         )
